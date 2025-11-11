@@ -1,0 +1,22 @@
+{
+  "name": "qr-manager-backend",
+  "version": "1.0.0",
+  "description": "Backend para QR Manager - ResidenteApp y VigilanciaApp",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "mongodb": "^6.3.0",
+    "dotenv": "^16.3.1"
+  },
+  "author": "Papayo15",
+  "license": "MIT"
+}
