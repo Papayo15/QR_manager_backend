@@ -48,6 +48,9 @@ async function connectToDatabase() {
       { unique: true }
     );
     await db.collection('qrCodes').createIndex({ code: 1 });
+    await db.collection('ines').createIndex(
+      { houseNumber: 1, condominio: 1 }
+    );
 
     return db;
   } catch (error) {
@@ -458,22 +461,36 @@ app.post('/api/counters', async (req, res) => {
       });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Obtener fecha de inicio del día en UTC
+    const now = new Date();
+    const today = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const todayISO = today.toISOString();
+
+    console.log(`📊 Obteniendo contadores desde: ${todayISO}`);
 
     const total = await db.collection('qrCodes').countDocuments({
-      createdAt: { $gte: today.toISOString() }
+      createdAt: { $gte: todayISO }
     });
 
     const validated = await db.collection('qrCodes').countDocuments({
-      createdAt: { $gte: today.toISOString() },
-      estado: 'usado'
+      createdAt: { $gte: todayISO },
+      $or: [
+        { estado: 'usado' },
+        { isUsed: true }
+      ]
     });
 
     const denied = await db.collection('qrCodes').countDocuments({
-      createdAt: { $gte: today.toISOString() },
+      createdAt: { $gte: todayISO },
       estado: 'expirado'
     });
+
+    console.log(`📊 Resultados - Generados: ${total}, Avalados: ${validated}, Negados: ${denied}`);
 
     res.json({
       success: true,
@@ -484,7 +501,7 @@ app.post('/api/counters', async (req, res) => {
         generated: total,
         validated: validated,
         denied: denied,
-        date: today.toISOString()
+        date: todayISO
       }
     });
 
@@ -492,7 +509,8 @@ app.post('/api/counters', async (req, res) => {
     console.error('❌ Error obteniendo contadores:', error);
     res.status(500).json({
       success: false,
-      error: 'Error interno del servidor'
+      error: 'Error interno del servidor',
+      details: error.message
     });
   }
 });
@@ -515,6 +533,124 @@ app.post('/api/register-worker', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error registrando trabajador:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor'
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Registrar INE
+// ============================================
+
+app.post('/api/register-ine', async (req, res) => {
+  try {
+    const {
+      houseNumber,
+      condominio,
+      nombre,
+      apellido,
+      numeroINE,
+      curp,
+      photoFrontal,
+      photoTrasera,
+      observaciones
+    } = req.body;
+
+    // Validar datos requeridos
+    if (!houseNumber || !condominio || !nombre) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan datos requeridos: houseNumber, condominio, nombre'
+      });
+    }
+
+    if (!db) {
+      return res.status(503).json({
+        success: false,
+        error: 'Base de datos no disponible'
+      });
+    }
+
+    const now = new Date();
+    const ineData = {
+      houseNumber: houseNumber.toString(),
+      condominio: condominio,
+      nombre: nombre,
+      apellido: apellido || '',
+      numeroINE: numeroINE || '',
+      curp: curp || '',
+      photoFrontal: photoFrontal || '',
+      photoTrasera: photoTrasera || '',
+      observaciones: observaciones || '',
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      status: 'activo'
+    };
+
+    // Guardar INE en la base de datos
+    const result = await db.collection('ines').insertOne(ineData);
+
+    console.log(`✅ INE registrado - Casa: ${houseNumber}, Nombre: ${nombre} ${apellido}, Condominio: ${condominio}`);
+
+    res.json({
+      success: true,
+      message: 'INE registrado correctamente',
+      data: {
+        id: result.insertedId,
+        ...ineData
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error registrando INE:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Obtener INEs por Casa
+// ============================================
+
+app.get('/api/get-ines', async (req, res) => {
+  try {
+    const { houseNumber, condominio } = req.query;
+
+    if (!houseNumber || !condominio) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parámetros requeridos: houseNumber, condominio'
+      });
+    }
+
+    if (!db) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    const ines = await db.collection('ines')
+      .find({
+        houseNumber: houseNumber.toString(),
+        condominio: condominio,
+        status: 'activo'
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({
+      success: true,
+      data: ines
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo INEs:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor'
