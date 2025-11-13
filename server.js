@@ -51,6 +51,9 @@ async function connectToDatabase() {
     await db.collection('ines').createIndex(
       { houseNumber: 1, condominio: 1 }
     );
+    await db.collection('workers').createIndex(
+      { houseNumber: 1, condominio: 1 }
+    );
 
     return db;
   } catch (error) {
@@ -445,6 +448,78 @@ app.get('/api/get-history', async (req, res) => {
 // ENDPOINT: Contadores (para Vigilancia)
 // ============================================
 
+// GET para compatibilidad con apps antiguas
+app.get('/api/counters', async (req, res) => {
+  try {
+    if (!db) {
+      return res.json({
+        success: true,
+        data: {
+          generados: 0,
+          avalados: 0,
+          negados: 0,
+          generated: 0,
+          validated: 0,
+          denied: 0
+        }
+      });
+    }
+
+    // Obtener fecha de inicio del día en UTC
+    const now = new Date();
+    const today = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const todayISO = today.toISOString();
+
+    console.log(`📊 Obteniendo contadores desde: ${todayISO}`);
+
+    const total = await db.collection('qrCodes').countDocuments({
+      createdAt: { $gte: todayISO }
+    });
+
+    const validated = await db.collection('qrCodes').countDocuments({
+      createdAt: { $gte: todayISO },
+      $or: [
+        { estado: 'usado' },
+        { isUsed: true }
+      ]
+    });
+
+    const denied = await db.collection('qrCodes').countDocuments({
+      createdAt: { $gte: todayISO },
+      estado: 'expirado'
+    });
+
+    console.log(`📊 Resultados - Generados: ${total}, Avalados: ${validated}, Negados: ${denied}`);
+
+    res.json({
+      success: true,
+      data: {
+        generados: total,
+        avalados: validated,
+        negados: denied,
+        generated: total,
+        validated: validated,
+        denied: denied,
+        date: todayISO
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo contadores:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// POST también soportado
 app.post('/api/counters', async (req, res) => {
   try {
     if (!db) {
@@ -516,26 +591,60 @@ app.post('/api/counters', async (req, res) => {
 });
 
 // ============================================
-// ENDPOINT: Registrar Trabajador (placeholder)
+// ENDPOINT: Registrar Trabajador/INE
 // ============================================
 
 app.post('/api/register-worker', async (req, res) => {
   try {
     const { houseNumber, workerName, workerType, photoBase64, condominio } = req.body;
 
-    // Por ahora solo retornar éxito
-    console.log(`✅ Trabajador registrado: ${workerName} - Casa ${houseNumber}`);
+    // Validar datos requeridos
+    if (!houseNumber || !condominio || !workerName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan datos requeridos: houseNumber, condominio, workerName'
+      });
+    }
+
+    if (!db) {
+      return res.status(503).json({
+        success: false,
+        error: 'Base de datos no disponible'
+      });
+    }
+
+    const now = new Date();
+    const workerData = {
+      houseNumber: houseNumber.toString(),
+      condominio: condominio,
+      nombre: workerName,
+      tipo: workerType || 'general',
+      photo: photoBase64 || '',
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      status: 'activo'
+    };
+
+    // Guardar en la base de datos
+    const result = await db.collection('workers').insertOne(workerData);
+
+    console.log(`✅ Trabajador/INE registrado - Casa: ${houseNumber}, Nombre: ${workerName}, Tipo: ${workerType}, Condominio: ${condominio}`);
 
     res.json({
       success: true,
-      message: 'Trabajador registrado correctamente'
+      message: 'Trabajador registrado correctamente',
+      data: {
+        id: result.insertedId,
+        ...workerData
+      }
     });
 
   } catch (error) {
     console.error('❌ Error registrando trabajador:', error);
     res.status(500).json({
       success: false,
-      error: 'Error interno del servidor'
+      error: 'Error interno del servidor',
+      details: error.message
     });
   }
 });
