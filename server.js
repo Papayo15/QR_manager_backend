@@ -2,6 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
+import { google } from 'googleapis';
+import { readFileSync } from 'fs';
+import { Readable } from 'stream';
 
 dotenv.config();
 
@@ -24,6 +27,89 @@ app.use((req, res, next) => {
 // Variables globales
 let db;
 let mongoClient;
+
+// ============================================
+// CONFIGURACIÓN DE GOOGLE DRIVE
+// ============================================
+
+const DRIVE_FOLDER_ID = '19odj_9kYCT40qb9f_YSCOCpIt5jIWPCe';
+let driveService;
+
+async function initializeGoogleDrive() {
+  try {
+    let credentials;
+
+    // Intentar leer desde archivo primero (desarrollo local)
+    try {
+      credentials = JSON.parse(readFileSync('./google-credentials.json', 'utf8'));
+      console.log('📁 Credenciales cargadas desde archivo');
+    } catch {
+      // Si no existe el archivo, usar variables de entorno (producción en Render)
+      if (process.env.GOOGLE_CREDENTIALS) {
+        credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        console.log('🔐 Credenciales cargadas desde variable de entorno');
+      } else {
+        throw new Error('No se encontraron credenciales de Google Drive');
+      }
+    }
+
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: ['https://www.googleapis.com/auth/drive.file'],
+    });
+
+    driveService = google.drive({ version: 'v3', auth });
+    console.log('✅ Google Drive inicializado');
+    return driveService;
+  } catch (error) {
+    console.error('❌ Error inicializando Google Drive:', error.message);
+    return null;
+  }
+}
+
+// Función para subir foto a Google Drive
+async function uploadPhotoToDrive(photoBase64, fileName, mimeType = 'image/jpeg') {
+  if (!driveService) {
+    console.warn('⚠️ Google Drive no está inicializado');
+    return null;
+  }
+
+  try {
+    // Convertir base64 a buffer
+    const base64Data = photoBase64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Crear stream del buffer
+    const stream = Readable.from(buffer);
+
+    const fileMetadata = {
+      name: fileName,
+      parents: [DRIVE_FOLDER_ID]
+    };
+
+    const media = {
+      mimeType: mimeType,
+      body: stream
+    };
+
+    const file = await driveService.files.create({
+      requestBody: fileMetadata,
+      media: media,
+      fields: 'id, webViewLink, webContentLink'
+    });
+
+    console.log(`📤 Foto subida a Drive: ${file.data.id}`);
+
+    return {
+      fileId: file.data.id,
+      webViewLink: file.data.webViewLink,
+      webContentLink: file.data.webContentLink
+    };
+  } catch (error) {
+    console.error('❌ Error subiendo foto a Drive:', error.message);
+    return null;
+  }
+}
 
 // ============================================
 // CONEXIÓN A MONGODB
@@ -614,12 +700,32 @@ app.post('/api/register-worker', async (req, res) => {
     }
 
     const now = new Date();
+    let driveFileUrl = null;
+    let driveFileId = null;
+
+    // Subir foto a Google Drive si existe
+    if (photoBase64 && photoBase64.trim() !== '') {
+      const timestamp = now.getTime();
+      const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
+
+      const driveResult = await uploadPhotoToDrive(photoBase64, fileName);
+
+      if (driveResult) {
+        driveFileUrl = driveResult.webViewLink;
+        driveFileId = driveResult.fileId;
+        console.log(`📁 Foto subida a Drive: ${driveFileUrl}`);
+      } else {
+        console.warn('⚠️ No se pudo subir foto a Drive, continuando sin ella...');
+      }
+    }
+
     const workerData = {
       houseNumber: houseNumber.toString(),
       condominio: condominio,
       nombre: workerName,
       tipo: workerType || 'general',
-      photo: photoBase64 || '',
+      photoUrl: driveFileUrl,
+      driveFileId: driveFileId,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
       status: 'activo'
@@ -807,6 +913,9 @@ async function startServer() {
   try {
     // Conectar a base de datos
     await connectToDatabase();
+
+    // Inicializar Google Drive
+    await initializeGoogleDrive();
 
     // Iniciar servidor
     app.listen(PORT, () => {
