@@ -32,78 +32,48 @@ let mongoClient;
 // CONFIGURACIÓN DE GOOGLE DRIVE Y SHEETS
 // ============================================
 
-const DRIVE_FOLDER_ID = process.env.DRIVE_FOLDER_ID || '19odj_9kYCT40qb9f_YSCOCpIt5jIWPCe';
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1h_fEz5tDjNmdZ-57F2CoL5W6RjjAF7Yhw4ttJgypb7o';
+const DRIVE_FOLDER_ID = '19odj_9kYCT40qb9f_YSCOCpIt5jIWPCe';
+const SPREADSHEET_ID = '1h_fEz5tDjNmdZ-57F2CoL5W6RjjAF7Yhw4ttJgypb7o';
 const SHEET_NAME = 'QR Codes'; // Nombre de la pestaña donde se guardarán los QR
 
 let driveService;
 let sheetsService;
-let authMethod = 'unknown';
 
 async function initializeGoogleServices() {
   try {
-    let auth;
+    let credentials;
 
-    // PRIORIDAD 1: Intentar OAuth primero (lo que funcionaba antes)
-    if (process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET && process.env.OAUTH_REFRESH_TOKEN) {
-      try {
-        const oauth2Client = new google.auth.OAuth2(
-          process.env.OAUTH_CLIENT_ID,
-          process.env.OAUTH_CLIENT_SECRET,
-          process.env.OAUTH_REDIRECT_URI
-        );
-
-        oauth2Client.setCredentials({
-          refresh_token: process.env.OAUTH_REFRESH_TOKEN
-        });
-
-        auth = oauth2Client;
-        authMethod = 'OAuth';
-        console.log('🔐 Usando autenticación OAuth (usuario)');
-      } catch (oauthError) {
-        console.warn('⚠️ OAuth falló, intentando Service Account...', oauthError.message);
-        auth = null;
+    // Intentar leer desde archivo primero (desarrollo local)
+    try {
+      credentials = JSON.parse(readFileSync('./google-credentials.json', 'utf8'));
+      console.log('📁 Credenciales cargadas desde archivo');
+    } catch {
+      // Si no existe el archivo, usar variables de entorno (producción en Render)
+      if (process.env.GOOGLE_CREDENTIALS) {
+        credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        console.log('🔐 Credenciales cargadas desde variable de entorno');
+      } else {
+        throw new Error('No se encontraron credenciales de Google');
       }
     }
 
-    // PRIORIDAD 2: Si OAuth falla o no existe, usar Service Account como respaldo
-    if (!auth) {
-      let credentials;
-      
-      try {
-        credentials = JSON.parse(readFileSync('./google-credentials.json', 'utf8'));
-        console.log('📁 Credenciales Service Account cargadas desde archivo');
-      } catch {
-        if (process.env.GOOGLE_CREDENTIALS) {
-          credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-          console.log('📁 Credenciales Service Account cargadas desde variable de entorno');
-        } else {
-          throw new Error('No se encontraron credenciales de Google (ni OAuth ni Service Account)');
-        }
-      }
-
-      auth = new google.auth.GoogleAuth({
-        credentials: credentials,
-        scopes: [
-          'https://www.googleapis.com/auth/drive',
-          'https://www.googleapis.com/auth/drive.file',
-          'https://www.googleapis.com/auth/spreadsheets'
-        ],
-      });
-
-      authMethod = 'ServiceAccount';
-      console.log('🔐 Usando autenticación Service Account (respaldo)');
-    }
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/spreadsheets'
+      ],
+    });
 
     // Inicializar Drive
     driveService = google.drive({ version: 'v3', auth });
-    console.log(`✅ Google Drive inicializado (${authMethod})`);
+    console.log('✅ Google Drive inicializado');
 
     // Inicializar Sheets
     sheetsService = google.sheets({ version: 'v4', auth });
-    console.log(`✅ Google Sheets inicializado (${authMethod})`);
+    console.log('✅ Google Sheets inicializado');
 
-    return { driveService, sheetsService, authMethod };
+    return { driveService, sheetsService };
   } catch (error) {
     console.error('❌ Error inicializando servicios de Google:', error.message);
     return null;
@@ -146,7 +116,23 @@ async function getOrCreateCondominioFolder(condominioName) {
     });
 
     const folderId = folder.data.id;
-    console.log(`✨ Nueva carpeta creada: ${condominioName} (${folderId}) usando ${authMethod}`);
+    console.log(`✨ Nueva carpeta creada: ${condominioName} (${folderId})`);
+
+    // CRITICAL FIX: Hacer la carpeta pública (writable) para evitar error de storage quota
+    // Cuando el Service Account crea la carpeta, necesita permisos especiales para subir archivos
+    try {
+      await driveService.permissions.create({
+        fileId: folderId,
+        requestBody: {
+          role: 'writer',
+          type: 'anyone'
+        },
+        fields: 'id'
+      });
+      console.log(`🔓 Carpeta ${condominioName} configurada con permisos de escritura`);
+    } catch (permError) {
+      console.warn(`⚠️ No se pudieron establecer permisos en la carpeta: ${permError.message}`);
+    }
 
     return folderId;
   } catch (error) {
@@ -210,7 +196,7 @@ async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 
     const directUrl = `https://drive.google.com/uc?export=view&id=${file.data.id}`;
 
     const folderInfo = condominioFolderId ? `en carpeta ${condominio}` : 'en carpeta principal';
-    console.log(`📤 Foto subida a Drive: ${file.data.id} (${finalFileName}) ${folderInfo} [${authMethod}]`);
+    console.log(`📤 Foto subida a Drive: ${file.data.id} (${finalFileName}) ${folderInfo}`);
     console.log(`🔓 Foto pública: ${directUrl}`);
 
     return {
@@ -447,8 +433,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
-    database: db ? 'connected' : 'disconnected',
-    authMethod: authMethod
+    database: db ? 'connected' : 'disconnected'
   });
 });
 
@@ -951,7 +936,7 @@ app.post('/api/register-worker', async (req, res) => {
     // Subir foto a Google Drive si existe
     if (photoBase64 && photoBase64.trim() !== '') {
       const timestamp = now.getTime();
-      const fileName = `Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
+      const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
 
       const driveResult = await uploadPhotoToDrive(photoBase64, fileName, condominio);
 
@@ -1046,7 +1031,7 @@ app.post('/api/register-ine', async (req, res) => {
 
     // Subir foto frontal a Google Drive si existe
     if (photoFrontal && photoFrontal.trim() !== '') {
-      const fileName = `Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
+      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
       const driveResult = await uploadPhotoToDrive(photoFrontal, fileName, condominio);
 
       if (driveResult) {
@@ -1061,7 +1046,7 @@ app.post('/api/register-ine', async (req, res) => {
 
     // Subir foto trasera a Google Drive si existe
     if (photoTrasera && photoTrasera.trim() !== '') {
-      const fileName = `Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
+      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
       const driveResult = await uploadPhotoToDrive(photoTrasera, fileName, condominio);
 
       if (driveResult) {
@@ -1163,6 +1148,50 @@ app.get('/api/get-ines', async (req, res) => {
 });
 
 // ============================================
+// ENDPOINT: Reset Sistema (Admin)
+// ============================================
+
+app.post('/api/admin/reset-all', async (req, res) => {
+  try {
+    console.log('⚠️ Iniciando reset completo del sistema...');
+
+    if (!db) {
+      return res.status(500).json({
+        success: false,
+        error: 'Base de datos no conectada'
+      });
+    }
+
+    // Borrar todas las colecciones
+    const collections = ['qrCodes', 'ines', 'workers', 'pushTokens'];
+    const results = {};
+
+    for (const collectionName of collections) {
+      const result = await db.collection(collectionName).deleteMany({});
+      results[collectionName] = result.deletedCount;
+      console.log(`🗑️ ${collectionName}: ${result.deletedCount} documentos eliminados`);
+    }
+
+    console.log('✅ Reset completo del sistema exitoso');
+
+    res.json({
+      success: true,
+      message: 'Sistema reseteado exitosamente',
+      deleted: results,
+      note: 'Google Drive y Sheets deben limpiarse manualmente si es necesario'
+    });
+
+  } catch (error) {
+    console.error('❌ Error en reset del sistema:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
 // FUNCIÓN: Keep-Alive Auto-Ping
 // ============================================
 
@@ -1210,7 +1239,6 @@ async function startServer() {
     app.listen(PORT, () => {
       console.log(`✅ Servidor corriendo en puerto ${PORT}`);
       console.log(`🔗 URL: ${SERVER_URL}`);
-      console.log(`🔐 Método de autenticación: ${authMethod}`);
       console.log(`📅 ${new Date().toISOString()}`);
 
       // Iniciar keep-alive después de 2 minutos
