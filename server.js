@@ -29,13 +29,17 @@ let db;
 let mongoClient;
 
 // ============================================
-// CONFIGURACIÓN DE GOOGLE DRIVE
+// CONFIGURACIÓN DE GOOGLE DRIVE Y SHEETS
 // ============================================
 
 const DRIVE_FOLDER_ID = '19odj_9kYCT40qb9f_YSCOCpIt5jIWPCe';
-let driveService;
+const SPREADSHEET_ID = '1h_fEz5tDjNmdZ-57F2CoL5W6RjjAF7Yhw4ttJgypb7o';
+const SHEET_NAME = 'QR Codes'; // Nombre de la pestaña donde se guardarán los QR
 
-async function initializeGoogleDrive() {
+let driveService;
+let sheetsService;
+
+async function initializeGoogleServices() {
   try {
     let credentials;
 
@@ -49,32 +53,92 @@ async function initializeGoogleDrive() {
         credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
         console.log('🔐 Credenciales cargadas desde variable de entorno');
       } else {
-        throw new Error('No se encontraron credenciales de Google Drive');
+        throw new Error('No se encontraron credenciales de Google');
       }
     }
 
     const auth = new google.auth.GoogleAuth({
       credentials: credentials,
-      scopes: ['https://www.googleapis.com/auth/drive.file'],
+      scopes: [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/spreadsheets'
+      ],
     });
 
+    // Inicializar Drive
     driveService = google.drive({ version: 'v3', auth });
     console.log('✅ Google Drive inicializado');
-    return driveService;
+
+    // Inicializar Sheets
+    sheetsService = google.sheets({ version: 'v4', auth });
+    console.log('✅ Google Sheets inicializado');
+
+    return { driveService, sheetsService };
   } catch (error) {
-    console.error('❌ Error inicializando Google Drive:', error.message);
+    console.error('❌ Error inicializando servicios de Google:', error.message);
     return null;
   }
 }
 
-// Función para subir foto a Google Drive
-async function uploadPhotoToDrive(photoBase64, fileName, mimeType = 'image/jpeg') {
+// Función para obtener o crear carpeta por condominio
+async function getOrCreateCondominioFolder(condominioName) {
   if (!driveService) {
     console.warn('⚠️ Google Drive no está inicializado');
     return null;
   }
 
   try {
+    // Buscar si ya existe la carpeta del condominio
+    const query = `name='${condominioName}' and '${DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+
+    const response = await driveService.files.list({
+      q: query,
+      fields: 'files(id, name)',
+      spaces: 'drive'
+    });
+
+    // Si existe, retornar el ID
+    if (response.data.files && response.data.files.length > 0) {
+      console.log(`📁 Carpeta existente encontrada: ${condominioName}`);
+      return response.data.files[0].id;
+    }
+
+    // Si no existe, crear la carpeta
+    const folderMetadata = {
+      name: condominioName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [DRIVE_FOLDER_ID]
+    };
+
+    const folder = await driveService.files.create({
+      requestBody: folderMetadata,
+      fields: 'id'
+    });
+
+    console.log(`✨ Nueva carpeta creada: ${condominioName} (${folder.data.id})`);
+    return folder.data.id;
+  } catch (error) {
+    console.error('❌ Error creando/buscando carpeta:', error.message);
+    return null;
+  }
+}
+
+// Función para subir foto a Google Drive
+async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 'image/jpeg') {
+  if (!driveService) {
+    console.warn('⚠️ Google Drive no está inicializado');
+    return null;
+  }
+
+  try {
+    // Obtener o crear carpeta del condominio
+    const condominioFolderId = await getOrCreateCondominioFolder(condominio);
+
+    if (!condominioFolderId) {
+      console.error('❌ No se pudo obtener carpeta del condominio');
+      return null;
+    }
+
     // Convertir base64 a buffer
     const base64Data = photoBase64.replace(/^data:image\/\w+;base64,/, '');
     const buffer = Buffer.from(base64Data, 'base64');
@@ -84,7 +148,7 @@ async function uploadPhotoToDrive(photoBase64, fileName, mimeType = 'image/jpeg'
 
     const fileMetadata = {
       name: fileName,
-      parents: [DRIVE_FOLDER_ID]
+      parents: [condominioFolderId] // Usar carpeta del condominio
     };
 
     const media = {
@@ -110,7 +174,7 @@ async function uploadPhotoToDrive(photoBase64, fileName, mimeType = 'image/jpeg'
     // Obtener URL directa de visualización
     const directUrl = `https://drive.google.com/uc?export=view&id=${file.data.id}`;
 
-    console.log(`📤 Foto subida a Drive: ${file.data.id}`);
+    console.log(`📤 Foto subida a Drive: ${file.data.id} (${condominio}/${fileName})`);
     console.log(`🔓 Foto pública: ${directUrl}`);
 
     return {
@@ -122,6 +186,111 @@ async function uploadPhotoToDrive(photoBase64, fileName, mimeType = 'image/jpeg'
   } catch (error) {
     console.error('❌ Error subiendo foto a Drive:', error.message);
     return null;
+  }
+}
+
+// Función para obtener o crear pestaña por condominio
+async function getOrCreateCondominioSheet(condominioName) {
+  if (!sheetsService) {
+    console.warn('⚠️ Google Sheets no está inicializado');
+    return null;
+  }
+
+  try {
+    // Obtener todas las pestañas existentes
+    const spreadsheet = await sheetsService.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID
+    });
+
+    // Buscar si ya existe la pestaña del condominio
+    const existingSheet = spreadsheet.data.sheets.find(
+      sheet => sheet.properties.title === condominioName
+    );
+
+    if (existingSheet) {
+      console.log(`📄 Pestaña existente encontrada: ${condominioName}`);
+      return condominioName;
+    }
+
+    // Si no existe, crear la pestaña
+    await sheetsService.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: condominioName
+            }
+          }
+        }]
+      }
+    });
+
+    // Agregar encabezados a la nueva pestaña
+    const headers = [
+      ['Código', 'Casa', 'Condominio', 'Visitante', 'Residente', 'Creado', 'Expira', 'Estado', 'Usado', 'Fecha Uso']
+    ];
+
+    await sheetsService.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${condominioName}!A1:J1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: headers
+      }
+    });
+
+    console.log(`✨ Nueva pestaña creada: ${condominioName}`);
+    return condominioName;
+  } catch (error) {
+    console.error('❌ Error creando/buscando pestaña:', error.message);
+    return null;
+  }
+}
+
+// Función para guardar QR code en Google Sheets
+async function saveQRToSheet(qrData) {
+  if (!sheetsService) {
+    console.warn('⚠️ Google Sheets no está inicializado');
+    return false;
+  }
+
+  try {
+    // Obtener o crear pestaña del condominio
+    const sheetName = await getOrCreateCondominioSheet(qrData.condominio);
+
+    if (!sheetName) {
+      console.error('❌ No se pudo obtener pestaña del condominio');
+      return false;
+    }
+
+    const row = [
+      qrData.code || '',
+      qrData.houseNumber || qrData.casa || '',
+      qrData.condominio || '',
+      qrData.visitante || '',
+      qrData.residente || '',
+      qrData.createdAt || new Date().toISOString(),
+      qrData.expiresAt || '',
+      qrData.estado || 'activo',
+      qrData.isUsed ? 'Sí' : 'No',
+      qrData.usedAt || ''
+    ];
+
+    await sheetsService.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A:J`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [row]
+      }
+    });
+
+    console.log(`📊 QR guardado en Sheet: ${qrData.code} (${sheetName})`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error guardando en Sheet:', error.message);
+    return false;
   }
 }
 
@@ -345,6 +514,9 @@ app.post('/api/register-code', async (req, res) => {
     if (db) {
       await db.collection('qrCodes').insertOne(qrData);
     }
+
+    // Guardar en Google Sheets
+    await saveQRToSheet(qrData);
 
     console.log(`✅ Código QR generado para casa ${houseNumber}`);
 
@@ -723,7 +895,7 @@ app.post('/api/register-worker', async (req, res) => {
       const timestamp = now.getTime();
       const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
 
-      const driveResult = await uploadPhotoToDrive(photoBase64, fileName);
+      const driveResult = await uploadPhotoToDrive(photoBase64, fileName, condominio);
 
       if (driveResult) {
         driveFileUrl = driveResult.webViewLink;
@@ -817,7 +989,7 @@ app.post('/api/register-ine', async (req, res) => {
     // Subir foto frontal a Google Drive si existe
     if (photoFrontal && photoFrontal.trim() !== '') {
       const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
-      const driveResult = await uploadPhotoToDrive(photoFrontal, fileName);
+      const driveResult = await uploadPhotoToDrive(photoFrontal, fileName, condominio);
 
       if (driveResult) {
         photoFrontalUrl = driveResult.webViewLink;
@@ -832,7 +1004,7 @@ app.post('/api/register-ine', async (req, res) => {
     // Subir foto trasera a Google Drive si existe
     if (photoTrasera && photoTrasera.trim() !== '') {
       const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
-      const driveResult = await uploadPhotoToDrive(photoTrasera, fileName);
+      const driveResult = await uploadPhotoToDrive(photoTrasera, fileName, condominio);
 
       if (driveResult) {
         photoTraseraUrl = driveResult.webViewLink;
@@ -973,8 +1145,8 @@ async function startServer() {
     // Conectar a base de datos
     await connectToDatabase();
 
-    // Inicializar Google Drive
-    await initializeGoogleDrive();
+    // Inicializar Google Drive y Sheets
+    await initializeGoogleServices();
 
     // Iniciar servidor
     app.listen(PORT, () => {
