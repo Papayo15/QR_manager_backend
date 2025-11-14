@@ -15,8 +15,8 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' })); // Permitir fotos grandes en base64
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Logging middleware
 app.use((req, res, next) => {
@@ -98,12 +98,26 @@ async function uploadPhotoToDrive(photoBase64, fileName, mimeType = 'image/jpeg'
       fields: 'id, webViewLink, webContentLink'
     });
 
+    // Hacer el archivo público para que se pueda visualizar
+    await driveService.permissions.create({
+      fileId: file.data.id,
+      requestBody: {
+        role: 'reader',
+        type: 'anyone'
+      }
+    });
+
+    // Obtener URL directa de visualización
+    const directUrl = `https://drive.google.com/uc?export=view&id=${file.data.id}`;
+
     console.log(`📤 Foto subida a Drive: ${file.data.id}`);
+    console.log(`🔓 Foto pública: ${directUrl}`);
 
     return {
       fileId: file.data.id,
       webViewLink: file.data.webViewLink,
-      webContentLink: file.data.webContentLink
+      webContentLink: file.data.webContentLink,
+      directUrl: directUrl
     };
   } catch (error) {
     console.error('❌ Error subiendo foto a Drive:', error.message);
@@ -702,6 +716,7 @@ app.post('/api/register-worker', async (req, res) => {
     const now = new Date();
     let driveFileUrl = null;
     let driveFileId = null;
+    let photoDirectUrl = null;
 
     // Subir foto a Google Drive si existe
     if (photoBase64 && photoBase64.trim() !== '') {
@@ -713,6 +728,7 @@ app.post('/api/register-worker', async (req, res) => {
       if (driveResult) {
         driveFileUrl = driveResult.webViewLink;
         driveFileId = driveResult.fileId;
+        photoDirectUrl = driveResult.directUrl;
         console.log(`📁 Foto subida a Drive: ${driveFileUrl}`);
       } else {
         console.warn('⚠️ No se pudo subir foto a Drive, continuando sin ella...');
@@ -725,6 +741,7 @@ app.post('/api/register-worker', async (req, res) => {
       nombre: workerName,
       tipo: workerType || 'general',
       photoUrl: driveFileUrl,
+      photoDirectUrl: photoDirectUrl,
       driveFileId: driveFileId,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
@@ -789,6 +806,44 @@ app.post('/api/register-ine', async (req, res) => {
     }
 
     const now = new Date();
+    const timestamp = now.getTime();
+    let photoFrontalUrl = null;
+    let photoTraseraUrl = null;
+    let photoFrontalId = null;
+    let photoTraseraId = null;
+    let photoFrontalDirectUrl = null;
+    let photoTraseraDirectUrl = null;
+
+    // Subir foto frontal a Google Drive si existe
+    if (photoFrontal && photoFrontal.trim() !== '') {
+      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
+      const driveResult = await uploadPhotoToDrive(photoFrontal, fileName);
+
+      if (driveResult) {
+        photoFrontalUrl = driveResult.webViewLink;
+        photoFrontalId = driveResult.fileId;
+        photoFrontalDirectUrl = driveResult.directUrl;
+        console.log(`📁 Foto frontal subida a Drive: ${photoFrontalUrl}`);
+      } else {
+        console.warn('⚠️ No se pudo subir foto frontal a Drive');
+      }
+    }
+
+    // Subir foto trasera a Google Drive si existe
+    if (photoTrasera && photoTrasera.trim() !== '') {
+      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
+      const driveResult = await uploadPhotoToDrive(photoTrasera, fileName);
+
+      if (driveResult) {
+        photoTraseraUrl = driveResult.webViewLink;
+        photoTraseraId = driveResult.fileId;
+        photoTraseraDirectUrl = driveResult.directUrl;
+        console.log(`📁 Foto trasera subida a Drive: ${photoTraseraUrl}`);
+      } else {
+        console.warn('⚠️ No se pudo subir foto trasera a Drive');
+      }
+    }
+
     const ineData = {
       houseNumber: houseNumber.toString(),
       condominio: condominio,
@@ -796,8 +851,12 @@ app.post('/api/register-ine', async (req, res) => {
       apellido: apellido || '',
       numeroINE: numeroINE || '',
       curp: curp || '',
-      photoFrontal: photoFrontal || '',
-      photoTrasera: photoTrasera || '',
+      photoFrontalUrl: photoFrontalUrl,
+      photoFrontalDirectUrl: photoFrontalDirectUrl,
+      photoFrontalId: photoFrontalId,
+      photoTraseraUrl: photoTraseraUrl,
+      photoTraseraDirectUrl: photoTraseraDirectUrl,
+      photoTraseraId: photoTraseraId,
       observaciones: observaciones || '',
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
