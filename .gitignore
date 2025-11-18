@@ -9,6 +9,9 @@ yarn.lock
 .env.local
 .env.production
 
+# Credenciales de Google
+google-credentials.json
+
 # Archivos del sistema
 .DS_Store
 Thumbs.db

@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
+import { readFileSync } from 'fs';
 import { Readable } from 'stream';
 
 dotenv.config();
@@ -12,15 +13,9 @@ const PORT = process.env.PORT || 3000;
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// Google Drive Configuration
-const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID;
-const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET;
-const OAUTH_REFRESH_TOKEN = process.env.OAUTH_REFRESH_TOKEN;
-const DRIVE_FOLDER_ID = process.env.DRIVE_FOLDER_ID;
-
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '50mb' })); // Permitir fotos grandes en base64
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Logging middleware
@@ -32,84 +27,313 @@ app.use((req, res, next) => {
 // Variables globales
 let db;
 let mongoClient;
-let driveClient;
 
 // ============================================
-// CONFIGURACIÓN DE GOOGLE DRIVE
+// CONFIGURACIÓN DE GOOGLE DRIVE Y SHEETS
 // ============================================
 
-function initializeDriveClient() {
+const DRIVE_FOLDER_ID = '19odj_9kYCT40qb9f_YSCOCpIt5jIWPCe';
+const SPREADSHEET_ID = '1h_fEz5tDjNmdZ-57F2CoL5W6RjjAF7Yhw4ttJgypb7o';
+const SHEET_NAME = 'QR Codes'; // Nombre de la pestaña donde se guardarán los QR
+
+let driveService;
+let sheetsService;
+
+async function initializeGoogleServices() {
   try {
-    if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET || !OAUTH_REFRESH_TOKEN) {
-      console.warn('⚠️ Credenciales de Google Drive no configuradas');
-      return null;
+    let credentials;
+
+    // Intentar leer desde archivo primero (desarrollo local)
+    try {
+      credentials = JSON.parse(readFileSync('./google-credentials.json', 'utf8'));
+      console.log('📁 Credenciales cargadas desde archivo');
+    } catch {
+      // Si no existe el archivo, usar variables de entorno (producción en Render)
+      if (process.env.GOOGLE_CREDENTIALS) {
+        credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        console.log('🔐 Credenciales cargadas desde variable de entorno');
+      } else {
+        throw new Error('No se encontraron credenciales de Google');
+      }
     }
 
-    const oauth2Client = new google.auth.OAuth2(
-      OAUTH_CLIENT_ID,
-      OAUTH_CLIENT_SECRET,
-      process.env.OAUTH_REDIRECT_URI || 'http://localhost:3000/oauth2callback'
-    );
-
-    oauth2Client.setCredentials({
-      refresh_token: OAUTH_REFRESH_TOKEN
+    const auth = new google.auth.GoogleAuth({
+      credentials: credentials,
+      scopes: [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/spreadsheets'
+      ],
     });
 
-    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    // Inicializar Drive
+    driveService = google.drive({ version: 'v3', auth });
+    console.log('✅ Google Drive inicializado');
 
-    console.log('✅ Cliente de Google Drive inicializado');
-    return drive;
+    // Inicializar Sheets
+    sheetsService = google.sheets({ version: 'v4', auth });
+    console.log('✅ Google Sheets inicializado');
+
+    return { driveService, sheetsService };
   } catch (error) {
-    console.error('❌ Error inicializando Google Drive:', error.message);
+    console.error('❌ Error inicializando servicios de Google:', error.message);
     return null;
   }
 }
 
-// ============================================
-// FUNCIÓN: Subir foto a Google Drive
-// ============================================
-
-async function uploadPhotoToDrive(photoBase64, fileName, metadata = {}) {
-  if (!driveClient) {
-    throw new Error('Cliente de Google Drive no disponible');
-  }
-
-  if (!DRIVE_FOLDER_ID) {
-    throw new Error('DRIVE_FOLDER_ID no configurado');
+// Función para obtener o crear carpeta por condominio
+async function getOrCreateCondominioFolder(condominioName) {
+  if (!driveService) {
+    console.warn('⚠️ Google Drive no está inicializado');
+    return null;
   }
 
   try {
-    const buffer = Buffer.from(photoBase64, 'base64');
+    // Buscar si ya existe la carpeta del condominio
+    const query = `name='${condominioName}' and '${DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+
+    const response = await driveService.files.list({
+      q: query,
+      fields: 'files(id, name)',
+      spaces: 'drive'
+    });
+
+    // Si existe, retornar el ID
+    if (response.data.files && response.data.files.length > 0) {
+      console.log(`📁 Carpeta existente encontrada: ${condominioName}`);
+      return response.data.files[0].id;
+    }
+
+    // Si no existe, crear la carpeta
+    const folderMetadata = {
+      name: condominioName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [DRIVE_FOLDER_ID]
+    };
+
+    const folder = await driveService.files.create({
+      requestBody: folderMetadata,
+      fields: 'id'
+    });
+
+    const folderId = folder.data.id;
+    console.log(`✨ Nueva carpeta creada: ${condominioName} (${folderId})`);
+
+    // CRITICAL FIX: Hacer la carpeta pública (writable) para evitar error de storage quota
+    // Cuando el Service Account crea la carpeta, necesita permisos especiales para subir archivos
+    try {
+      await driveService.permissions.create({
+        fileId: folderId,
+        requestBody: {
+          role: 'writer',
+          type: 'anyone'
+        },
+        fields: 'id'
+      });
+      console.log(`🔓 Carpeta ${condominioName} configurada con permisos de escritura`);
+    } catch (permError) {
+      console.warn(`⚠️ No se pudieron establecer permisos en la carpeta: ${permError.message}`);
+    }
+
+    return folderId;
+  } catch (error) {
+    console.error('❌ Error creando/buscando carpeta:', error.message);
+    return null;
+  }
+}
+
+// Función para subir foto a Google Drive
+async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 'image/jpeg') {
+  if (!driveService) {
+    console.warn('⚠️ Google Drive no está inicializado');
+    return null;
+  }
+
+  try {
+    // Convertir base64 a buffer
+    const base64Data = photoBase64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Crear stream del buffer
     const stream = Readable.from(buffer);
 
+    // Obtener o crear la carpeta del condominio
+    const condominioFolderId = await getOrCreateCondominioFolder(condominio);
+
+    // Si no se pudo obtener/crear la carpeta, subir a la carpeta principal como fallback
+    const targetFolderId = condominioFolderId || DRIVE_FOLDER_ID;
+    const finalFileName = condominioFolderId ? fileName : `${condominio}_${fileName}`;
+
+    if (!condominioFolderId) {
+      console.warn(`⚠️ No se pudo crear carpeta para ${condominio}, subiendo a carpeta principal`);
+    }
+
     const fileMetadata = {
-      name: fileName,
-      parents: [DRIVE_FOLDER_ID],
-      description: JSON.stringify(metadata)
+      name: finalFileName,
+      parents: [targetFolderId]
     };
 
     const media = {
-      mimeType: 'image/jpeg',
+      mimeType: mimeType,
       body: stream
     };
 
-    const response = await driveClient.files.create({
-      resource: fileMetadata,
+    const file = await driveService.files.create({
+      requestBody: fileMetadata,
       media: media,
-      fields: 'id, name, webViewLink, webContentLink'
+      fields: 'id, webViewLink, webContentLink'
     });
 
-    console.log(`📤 Foto subida a Drive - ID: ${response.data.id} - Nombre: ${fileName}`);
+    // Hacer el archivo público para que se pueda visualizar
+    await driveService.permissions.create({
+      fileId: file.data.id,
+      requestBody: {
+        role: 'reader',
+        type: 'anyone'
+      }
+    });
+
+    // Obtener URL directa de visualización
+    const directUrl = `https://drive.google.com/uc?export=view&id=${file.data.id}`;
+
+    const folderInfo = condominioFolderId ? `en carpeta ${condominio}` : 'en carpeta principal';
+    console.log(`📤 Foto subida a Drive: ${file.data.id} (${finalFileName}) ${folderInfo}`);
+    console.log(`🔓 Foto pública: ${directUrl}`);
 
     return {
-      fileId: response.data.id,
-      fileName: response.data.name,
-      webViewLink: response.data.webViewLink,
-      webContentLink: response.data.webContentLink
+      fileId: file.data.id,
+      webViewLink: file.data.webViewLink,
+      webContentLink: file.data.webContentLink,
+      directUrl: directUrl
     };
   } catch (error) {
     console.error('❌ Error subiendo foto a Drive:', error.message);
-    throw error;
+    return null;
+  }
+}
+
+// Función para obtener o crear pestaña por condominio
+async function getOrCreateCondominioSheet(condominioName) {
+  if (!sheetsService) {
+    console.warn('⚠️ Google Sheets no está inicializado');
+    return null;
+  }
+
+  try {
+    // Obtener todas las pestañas existentes
+    const spreadsheet = await sheetsService.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID
+    });
+
+    // Buscar si ya existe la pestaña del condominio
+    const existingSheet = spreadsheet.data.sheets.find(
+      sheet => sheet.properties.title === condominioName
+    );
+
+    if (existingSheet) {
+      console.log(`📄 Pestaña existente encontrada: ${condominioName}`);
+      return condominioName;
+    }
+
+    // Si no existe, crear la pestaña
+    await sheetsService.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: condominioName
+            }
+          }
+        }]
+      }
+    });
+
+    // Agregar encabezados a la nueva pestaña
+    const headers = [
+      ['Código', 'Casa', 'Condominio', 'Visitante', 'Residente', 'Creado', 'Expira', 'Estado', 'Usado', 'Fecha Uso']
+    ];
+
+    await sheetsService.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${condominioName}!A1:J1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: headers
+      }
+    });
+
+    console.log(`✨ Nueva pestaña creada: ${condominioName}`);
+    return condominioName;
+  } catch (error) {
+    console.error('❌ Error creando/buscando pestaña:', error.message);
+    return null;
+  }
+}
+
+// Función para convertir fecha UTC a hora local de México
+function formatDateForMexico(dateString) {
+  if (!dateString) return '';
+
+  const date = new Date(dateString);
+
+  // Convertir a hora de México (CST/CDT - America/Mexico_City)
+  const mexicoTime = date.toLocaleString('es-MX', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+
+  return mexicoTime;
+}
+
+// Función para guardar QR code en Google Sheets
+async function saveQRToSheet(qrData) {
+  if (!sheetsService) {
+    console.warn('⚠️ Google Sheets no está inicializado');
+    return false;
+  }
+
+  try {
+    // Obtener o crear pestaña del condominio
+    const sheetName = await getOrCreateCondominioSheet(qrData.condominio);
+
+    if (!sheetName) {
+      console.error('❌ No se pudo obtener pestaña del condominio');
+      return false;
+    }
+
+    const row = [
+      qrData.code || '',
+      qrData.houseNumber || qrData.casa || '',
+      qrData.condominio || '',
+      qrData.visitante || '',
+      qrData.residente || '',
+      formatDateForMexico(qrData.createdAt || new Date().toISOString()),
+      formatDateForMexico(qrData.expiresAt || ''),
+      qrData.estado || 'activo',
+      qrData.isUsed ? 'Sí' : 'No',
+      formatDateForMexico(qrData.usedAt || '')
+    ];
+
+    await sheetsService.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A:J`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [row]
+      }
+    });
+
+    console.log(`📊 QR guardado en Sheet: ${qrData.code} (${sheetName})`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error guardando en Sheet:', error.message);
+    return false;
   }
 }
 
@@ -136,7 +360,12 @@ async function connectToDatabase() {
       { unique: true }
     );
     await db.collection('qrCodes').createIndex({ code: 1 });
-    await db.collection('workers').createIndex({ houseNumber: 1, condominio: 1, createdAt: -1 });
+    await db.collection('ines').createIndex(
+      { houseNumber: 1, condominio: 1 }
+    );
+    await db.collection('workers').createIndex(
+      { houseNumber: 1, condominio: 1 }
+    );
 
     return db;
   } catch (error) {
@@ -204,8 +433,7 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
-    database: db ? 'connected' : 'disconnected',
-    googleDrive: driveClient ? 'configured' : 'not configured'
+    database: db ? 'connected' : 'disconnected'
   });
 });
 
@@ -329,6 +557,9 @@ app.post('/api/register-code', async (req, res) => {
     if (db) {
       await db.collection('qrCodes').insertOne(qrData);
     }
+
+    // Guardar en Google Sheets
+    await saveQRToSheet(qrData);
 
     console.log(`✅ Código QR generado para casa ${houseNumber}`);
 
@@ -532,6 +763,78 @@ app.get('/api/get-history', async (req, res) => {
 // ENDPOINT: Contadores (para Vigilancia)
 // ============================================
 
+// GET para compatibilidad con apps antiguas
+app.get('/api/counters', async (req, res) => {
+  try {
+    if (!db) {
+      return res.json({
+        success: true,
+        data: {
+          generados: 0,
+          avalados: 0,
+          negados: 0,
+          generated: 0,
+          validated: 0,
+          denied: 0
+        }
+      });
+    }
+
+    // Obtener fecha de inicio del día en UTC
+    const now = new Date();
+    const today = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const todayISO = today.toISOString();
+
+    console.log(`📊 Obteniendo contadores desde: ${todayISO}`);
+
+    const total = await db.collection('qrCodes').countDocuments({
+      createdAt: { $gte: todayISO }
+    });
+
+    const validated = await db.collection('qrCodes').countDocuments({
+      createdAt: { $gte: todayISO },
+      $or: [
+        { estado: 'usado' },
+        { isUsed: true }
+      ]
+    });
+
+    const denied = await db.collection('qrCodes').countDocuments({
+      createdAt: { $gte: todayISO },
+      estado: 'expirado'
+    });
+
+    console.log(`📊 Resultados - Generados: ${total}, Avalados: ${validated}, Negados: ${denied}`);
+
+    res.json({
+      success: true,
+      data: {
+        generados: total,
+        avalados: validated,
+        negados: denied,
+        generated: total,
+        validated: validated,
+        denied: denied,
+        date: todayISO
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo contadores:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// POST también soportado
 app.post('/api/counters', async (req, res) => {
   try {
     if (!db) {
@@ -548,22 +851,36 @@ app.post('/api/counters', async (req, res) => {
       });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Obtener fecha de inicio del día en UTC
+    const now = new Date();
+    const today = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    const todayISO = today.toISOString();
+
+    console.log(`📊 Obteniendo contadores desde: ${todayISO}`);
 
     const total = await db.collection('qrCodes').countDocuments({
-      createdAt: { $gte: today.toISOString() }
+      createdAt: { $gte: todayISO }
     });
 
     const validated = await db.collection('qrCodes').countDocuments({
-      createdAt: { $gte: today.toISOString() },
-      estado: 'usado'
+      createdAt: { $gte: todayISO },
+      $or: [
+        { estado: 'usado' },
+        { isUsed: true }
+      ]
     });
 
     const denied = await db.collection('qrCodes').countDocuments({
-      createdAt: { $gte: today.toISOString() },
+      createdAt: { $gte: todayISO },
       estado: 'expirado'
     });
+
+    console.log(`📊 Resultados - Generados: ${total}, Avalados: ${validated}, Negados: ${denied}`);
 
     res.json({
       success: true,
@@ -574,12 +891,255 @@ app.post('/api/counters', async (req, res) => {
         generated: total,
         validated: validated,
         denied: denied,
-        date: today.toISOString()
+        date: todayISO
       }
     });
 
   } catch (error) {
     console.error('❌ Error obteniendo contadores:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Registrar Trabajador/INE
+// ============================================
+
+app.post('/api/register-worker', async (req, res) => {
+  try {
+    const { houseNumber, workerName, workerType, photoBase64, condominio } = req.body;
+
+    // Validar datos requeridos
+    if (!houseNumber || !condominio || !workerName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan datos requeridos: houseNumber, condominio, workerName'
+      });
+    }
+
+    if (!db) {
+      return res.status(503).json({
+        success: false,
+        error: 'Base de datos no disponible'
+      });
+    }
+
+    const now = new Date();
+    let driveFileUrl = null;
+    let driveFileId = null;
+    let photoDirectUrl = null;
+
+    // Subir foto a Google Drive si existe
+    if (photoBase64 && photoBase64.trim() !== '') {
+      const timestamp = now.getTime();
+      const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
+
+      const driveResult = await uploadPhotoToDrive(photoBase64, fileName, condominio);
+
+      if (driveResult) {
+        driveFileUrl = driveResult.webViewLink;
+        driveFileId = driveResult.fileId;
+        photoDirectUrl = driveResult.directUrl;
+        console.log(`📁 Foto subida a Drive: ${driveFileUrl}`);
+      } else {
+        console.warn('⚠️ No se pudo subir foto a Drive, continuando sin ella...');
+      }
+    }
+
+    const workerData = {
+      houseNumber: houseNumber.toString(),
+      condominio: condominio,
+      nombre: workerName,
+      tipo: workerType || 'general',
+      photoUrl: driveFileUrl,
+      photoDirectUrl: photoDirectUrl,
+      driveFileId: driveFileId,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      status: 'activo'
+    };
+
+    // Guardar en la base de datos
+    const result = await db.collection('workers').insertOne(workerData);
+
+    console.log(`✅ Trabajador/INE registrado - Casa: ${houseNumber}, Nombre: ${workerName}, Tipo: ${workerType}, Condominio: ${condominio}`);
+
+    res.json({
+      success: true,
+      message: 'Trabajador registrado correctamente',
+      data: {
+        id: result.insertedId,
+        ...workerData
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error registrando trabajador:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Registrar INE
+// ============================================
+
+app.post('/api/register-ine', async (req, res) => {
+  try {
+    const {
+      houseNumber,
+      condominio,
+      nombre,
+      apellido,
+      numeroINE,
+      curp,
+      photoFrontal,
+      photoTrasera,
+      observaciones
+    } = req.body;
+
+    // Validar datos requeridos
+    if (!houseNumber || !condominio || !nombre) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan datos requeridos: houseNumber, condominio, nombre'
+      });
+    }
+
+    if (!db) {
+      return res.status(503).json({
+        success: false,
+        error: 'Base de datos no disponible'
+      });
+    }
+
+    const now = new Date();
+    const timestamp = now.getTime();
+    let photoFrontalUrl = null;
+    let photoTraseraUrl = null;
+    let photoFrontalId = null;
+    let photoTraseraId = null;
+    let photoFrontalDirectUrl = null;
+    let photoTraseraDirectUrl = null;
+
+    // Subir foto frontal a Google Drive si existe
+    if (photoFrontal && photoFrontal.trim() !== '') {
+      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
+      const driveResult = await uploadPhotoToDrive(photoFrontal, fileName, condominio);
+
+      if (driveResult) {
+        photoFrontalUrl = driveResult.webViewLink;
+        photoFrontalId = driveResult.fileId;
+        photoFrontalDirectUrl = driveResult.directUrl;
+        console.log(`📁 Foto frontal subida a Drive: ${photoFrontalUrl}`);
+      } else {
+        console.warn('⚠️ No se pudo subir foto frontal a Drive');
+      }
+    }
+
+    // Subir foto trasera a Google Drive si existe
+    if (photoTrasera && photoTrasera.trim() !== '') {
+      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
+      const driveResult = await uploadPhotoToDrive(photoTrasera, fileName, condominio);
+
+      if (driveResult) {
+        photoTraseraUrl = driveResult.webViewLink;
+        photoTraseraId = driveResult.fileId;
+        photoTraseraDirectUrl = driveResult.directUrl;
+        console.log(`📁 Foto trasera subida a Drive: ${photoTraseraUrl}`);
+      } else {
+        console.warn('⚠️ No se pudo subir foto trasera a Drive');
+      }
+    }
+
+    const ineData = {
+      houseNumber: houseNumber.toString(),
+      condominio: condominio,
+      nombre: nombre,
+      apellido: apellido || '',
+      numeroINE: numeroINE || '',
+      curp: curp || '',
+      photoFrontalUrl: photoFrontalUrl,
+      photoFrontalDirectUrl: photoFrontalDirectUrl,
+      photoFrontalId: photoFrontalId,
+      photoTraseraUrl: photoTraseraUrl,
+      photoTraseraDirectUrl: photoTraseraDirectUrl,
+      photoTraseraId: photoTraseraId,
+      observaciones: observaciones || '',
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      status: 'activo'
+    };
+
+    // Guardar INE en la base de datos
+    const result = await db.collection('ines').insertOne(ineData);
+
+    console.log(`✅ INE registrado - Casa: ${houseNumber}, Nombre: ${nombre} ${apellido}, Condominio: ${condominio}`);
+
+    res.json({
+      success: true,
+      message: 'INE registrado correctamente',
+      data: {
+        id: result.insertedId,
+        ...ineData
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error registrando INE:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Obtener INEs por Casa
+// ============================================
+
+app.get('/api/get-ines', async (req, res) => {
+  try {
+    const { houseNumber, condominio } = req.query;
+
+    if (!houseNumber || !condominio) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parámetros requeridos: houseNumber, condominio'
+      });
+    }
+
+    if (!db) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    const ines = await db.collection('ines')
+      .find({
+        houseNumber: houseNumber.toString(),
+        condominio: condominio,
+        status: 'activo'
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({
+      success: true,
+      data: ines
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo INEs:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor'
@@ -588,125 +1148,45 @@ app.post('/api/counters', async (req, res) => {
 });
 
 // ============================================
-// ENDPOINT: Registrar Trabajador
+// ENDPOINT: Reset Sistema (Admin)
 // ============================================
 
-app.post('/api/register-worker', async (req, res) => {
+app.post('/api/admin/reset-all', async (req, res) => {
   try {
-    const { houseNumber, workerName, workerType, photoBase64, condominio } = req.body;
+    console.log('⚠️ Iniciando reset completo del sistema...');
 
-    // Validar datos requeridos
-    if (!houseNumber || !workerName || !workerType || !condominio) {
-      return res.status(400).json({
+    if (!db) {
+      return res.status(500).json({
         success: false,
-        error: 'Faltan datos requeridos: houseNumber, workerName, workerType, condominio'
+        error: 'Base de datos no conectada'
       });
     }
 
-    if (!photoBase64) {
-      return res.status(400).json({
-        success: false,
-        error: 'La foto es requerida'
-      });
+    // Borrar todas las colecciones
+    const collections = ['qrCodes', 'ines', 'workers', 'pushTokens'];
+    const results = {};
+
+    for (const collectionName of collections) {
+      const result = await db.collection(collectionName).deleteMany({});
+      results[collectionName] = result.deletedCount;
+      console.log(`🗑️ ${collectionName}: ${result.deletedCount} documentos eliminados`);
     }
 
-    const now = new Date();
-    const timestamp = now.toISOString();
+    console.log('✅ Reset completo del sistema exitoso');
 
-    // Generar nombre de archivo único
-    const fileName = `trabajador_${condominio}_casa${houseNumber}_${workerType}_${Date.now()}.jpg`;
-
-    let driveFileData = null;
-    let workerData = {
-      houseNumber: houseNumber.toString(),
-      workerName: workerName.trim(),
-      workerType: workerType,
-      condominio: condominio,
-      createdAt: timestamp,
-      registeredAt: timestamp,
-      status: 'active'
-    };
-
-    // Intentar subir a Google Drive
-    if (driveClient && DRIVE_FOLDER_ID) {
-      try {
-        const metadata = {
-          houseNumber: houseNumber,
-          workerName: workerName,
-          workerType: workerType,
-          condominio: condominio,
-          registeredAt: timestamp
-        };
-
-        driveFileData = await uploadPhotoToDrive(photoBase64, fileName, metadata);
-
-        // Agregar información de Drive al documento
-        workerData.photo = {
-          driveFileId: driveFileData.fileId,
-          fileName: driveFileData.fileName,
-          webViewLink: driveFileData.webViewLink,
-          webContentLink: driveFileData.webContentLink,
-          uploadedAt: timestamp
-        };
-
-        console.log(`✅ Foto subida a Google Drive - Trabajador: ${workerName} - Casa: ${houseNumber}`);
-      } catch (driveError) {
-        console.error('❌ Error subiendo a Drive:', driveError.message);
-
-        // Si falla Drive, guardar en MongoDB como fallback
-        if (db) {
-          workerData.photoBase64 = photoBase64;
-          workerData.photoStoredInDB = true;
-          console.log('⚠️ Foto guardada en MongoDB como fallback');
-        } else {
-          throw new Error('No se pudo guardar la foto: Drive falló y MongoDB no disponible');
-        }
-      }
-    } else {
-      // Si Drive no está configurado, guardar en MongoDB
-      if (db) {
-        workerData.photoBase64 = photoBase64;
-        workerData.photoStoredInDB = true;
-        console.log('⚠️ Drive no configurado, guardando foto en MongoDB');
-      } else {
-        return res.status(503).json({
-          success: false,
-          error: 'Ni Google Drive ni MongoDB están disponibles para guardar la foto'
-        });
-      }
-    }
-
-    // Guardar registro en MongoDB (opcional pero recomendado)
-    let dbResult = null;
-    if (db) {
-      try {
-        dbResult = await db.collection('workers').insertOne(workerData);
-        console.log(`✅ Registro guardado en MongoDB - ID: ${dbResult.insertedId}`);
-      } catch (dbError) {
-        console.error('⚠️ Error guardando en MongoDB (no crítico):', dbError.message);
-      }
-    }
-
-    // Respuesta exitosa
     res.json({
       success: true,
-      message: 'Trabajador registrado correctamente',
-      data: {
-        id: dbResult?.insertedId || null,
-        workerName: workerName,
-        houseNumber: houseNumber,
-        workerType: workerType,
-        condominio: condominio,
-        createdAt: timestamp,
-        photo: workerData.photo || { storedInDB: true }
-      }
+      message: 'Sistema reseteado exitosamente',
+      deleted: results,
+      note: 'Google Drive y Sheets deben limpiarse manualmente si es necesario'
     });
 
   } catch (error) {
-    console.error('❌ Error registrando trabajador:', error);
+    console.error('❌ Error en reset del sistema:', error);
     res.status(500).json({
       success: false,
-      error: error.message || 'Error interno del servidor'
+      error: 'Error interno del servidor',
+      details: error.message
     });
   }
 });
@@ -749,19 +1229,17 @@ app.use((err, req, res, next) => {
 
 async function startServer() {
   try {
-    // Inicializar Google Drive
-    driveClient = initializeDriveClient();
-
     // Conectar a base de datos
     await connectToDatabase();
+
+    // Inicializar Google Drive y Sheets
+    await initializeGoogleServices();
 
     // Iniciar servidor
     app.listen(PORT, () => {
       console.log(`✅ Servidor corriendo en puerto ${PORT}`);
       console.log(`🔗 URL: ${SERVER_URL}`);
       console.log(`📅 ${new Date().toISOString()}`);
-      console.log(`📂 Google Drive: ${driveClient ? '✅ Configurado' : '⚠️ No configurado'}`);
-      console.log(`💾 MongoDB: ${db ? '✅ Conectado' : '⚠️ No conectado'}`);
 
       // Iniciar keep-alive después de 2 minutos
       setTimeout(() => {
