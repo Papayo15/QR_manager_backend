@@ -41,39 +41,67 @@ let sheetsService;
 
 async function initializeGoogleServices() {
   try {
-    let credentials;
+    // Verificar si tenemos credenciales OAuth (RECOMENDADO para subir archivos)
+    if (process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET && process.env.OAUTH_REFRESH_TOKEN) {
+      console.log('🔐 Usando OAuth para Google Drive y Sheets');
 
-    // Intentar leer desde archivo primero (desarrollo local)
-    try {
-      credentials = JSON.parse(readFileSync('./google-credentials.json', 'utf8'));
-      console.log('📁 Credenciales cargadas desde archivo');
-    } catch {
-      // Si no existe el archivo, usar variables de entorno (producción en Render)
-      if (process.env.GOOGLE_CREDENTIALS) {
-        credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-        console.log('🔐 Credenciales cargadas desde variable de entorno');
-      } else {
-        throw new Error('No se encontraron credenciales de Google');
-      }
+      const oauth2Client = new google.auth.OAuth2(
+        process.env.OAUTH_CLIENT_ID,
+        process.env.OAUTH_CLIENT_SECRET,
+        'http://localhost:3000/oauth2callback' // Redirect URI (no se usa en servidor, pero es requerido)
+      );
+
+      // Configurar el refresh token
+      oauth2Client.setCredentials({
+        refresh_token: process.env.OAUTH_REFRESH_TOKEN
+      });
+
+      // Inicializar servicios con OAuth
+      driveService = google.drive({ version: 'v3', auth: oauth2Client });
+      sheetsService = google.sheets({ version: 'v4', auth: oauth2Client });
+
+      console.log('✅ Google Drive inicializado con OAuth');
+      console.log('✅ Google Sheets inicializado con OAuth');
+
+      return { driveService, sheetsService };
     }
+    // Fallback a Service Account (solo para Sheets, NO para subir archivos)
+    else {
+      console.log('⚠️ OAuth no configurado, usando Service Account (limitado)');
+      let credentials;
 
-    const auth = new google.auth.GoogleAuth({
-      credentials: credentials,
-      scopes: [
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/spreadsheets'
-      ],
-    });
+      // Intentar leer desde archivo primero (desarrollo local)
+      try {
+        credentials = JSON.parse(readFileSync('./google-credentials.json', 'utf8'));
+        console.log('📁 Credenciales cargadas desde archivo');
+      } catch {
+        // Si no existe el archivo, usar variables de entorno (producción en Render)
+        if (process.env.GOOGLE_CREDENTIALS) {
+          credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+          console.log('🔐 Credenciales cargadas desde variable de entorno');
+        } else {
+          throw new Error('No se encontraron credenciales de Google (ni OAuth ni Service Account)');
+        }
+      }
 
-    // Inicializar Drive
-    driveService = google.drive({ version: 'v3', auth });
-    console.log('✅ Google Drive inicializado');
+      const auth = new google.auth.GoogleAuth({
+        credentials: credentials,
+        scopes: [
+          'https://www.googleapis.com/auth/drive.file',
+          'https://www.googleapis.com/auth/spreadsheets'
+        ],
+      });
 
-    // Inicializar Sheets
-    sheetsService = google.sheets({ version: 'v4', auth });
-    console.log('✅ Google Sheets inicializado');
+      // Inicializar Drive
+      driveService = google.drive({ version: 'v3', auth });
+      console.log('⚠️ Google Drive inicializado con Service Account (NO puede subir archivos)');
 
-    return { driveService, sheetsService };
+      // Inicializar Sheets
+      sheetsService = google.sheets({ version: 'v4', auth });
+      console.log('✅ Google Sheets inicializado');
+
+      return { driveService, sheetsService };
+    }
   } catch (error) {
     console.error('❌ Error inicializando servicios de Google:', error.message);
     return null;
