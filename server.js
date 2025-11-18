@@ -39,6 +39,9 @@ const SHEET_NAME = 'QR Codes'; // Nombre de la pestaña donde se guardarán los 
 let driveService;
 let sheetsService;
 
+// Caché de carpetas de condominios (para evitar búsquedas repetidas)
+const condominioFoldersCache = new Map();
+
 async function initializeGoogleServices() {
   try {
     // Verificar si tenemos credenciales OAuth (RECOMENDADO para subir archivos)
@@ -108,7 +111,7 @@ async function initializeGoogleServices() {
   }
 }
 
-// Función para obtener o crear carpeta por condominio
+// Función para obtener o crear carpeta por condominio (CON CACHÉ)
 async function getOrCreateCondominioFolder(condominioName) {
   if (!driveService) {
     console.warn('⚠️ Google Drive no está inicializado');
@@ -116,6 +119,13 @@ async function getOrCreateCondominioFolder(condominioName) {
   }
 
   try {
+    // Verificar caché primero (ULTRA RÁPIDO)
+    if (condominioFoldersCache.has(condominioName)) {
+      const cachedId = condominioFoldersCache.get(condominioName);
+      console.log(`⚡ Carpeta en caché: ${condominioName} (${cachedId})`);
+      return cachedId;
+    }
+
     // Buscar si ya existe la carpeta del condominio
     const query = `name='${condominioName}' and '${DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
 
@@ -125,10 +135,12 @@ async function getOrCreateCondominioFolder(condominioName) {
       spaces: 'drive'
     });
 
-    // Si existe, retornar el ID
+    // Si existe, guardarlo en caché y retornar el ID
     if (response.data.files && response.data.files.length > 0) {
-      console.log(`📁 Carpeta existente encontrada: ${condominioName}`);
-      return response.data.files[0].id;
+      const folderId = response.data.files[0].id;
+      condominioFoldersCache.set(condominioName, folderId); // Guardar en caché
+      console.log(`📁 Carpeta existente encontrada: ${condominioName} (${folderId})`);
+      return folderId;
     }
 
     // Si no existe, crear la carpeta
@@ -144,23 +156,22 @@ async function getOrCreateCondominioFolder(condominioName) {
     });
 
     const folderId = folder.data.id;
+    condominioFoldersCache.set(condominioName, folderId); // Guardar en caché
     console.log(`✨ Nueva carpeta creada: ${condominioName} (${folderId})`);
 
-    // CRITICAL FIX: Hacer la carpeta pública (writable) para evitar error de storage quota
-    // Cuando el Service Account crea la carpeta, necesita permisos especiales para subir archivos
-    try {
-      await driveService.permissions.create({
-        fileId: folderId,
-        requestBody: {
-          role: 'writer',
-          type: 'anyone'
-        },
-        fields: 'id'
-      });
+    // Hacer la carpeta pública (no bloquear si falla)
+    driveService.permissions.create({
+      fileId: folderId,
+      requestBody: {
+        role: 'writer',
+        type: 'anyone'
+      },
+      fields: 'id'
+    }).then(() => {
       console.log(`🔓 Carpeta ${condominioName} configurada con permisos de escritura`);
-    } catch (permError) {
+    }).catch(permError => {
       console.warn(`⚠️ No se pudieron establecer permisos en la carpeta: ${permError.message}`);
-    }
+    });
 
     return folderId;
   } catch (error) {
@@ -957,53 +968,95 @@ app.post('/api/register-worker', async (req, res) => {
     }
 
     const now = new Date();
-    let driveFileUrl = null;
-    let driveFileId = null;
-    let photoDirectUrl = null;
+    const timestamp = now.getTime();
 
-    // Subir foto a Google Drive si existe
-    if (photoBase64 && photoBase64.trim() !== '') {
-      const timestamp = now.getTime();
-      const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
-
-      const driveResult = await uploadPhotoToDrive(photoBase64, fileName, condominio);
-
-      if (driveResult) {
-        driveFileUrl = driveResult.webViewLink;
-        driveFileId = driveResult.fileId;
-        photoDirectUrl = driveResult.directUrl;
-        console.log(`📁 Foto subida a Drive: ${driveFileUrl}`);
-      } else {
-        console.warn('⚠️ No se pudo subir foto a Drive, continuando sin ella...');
-      }
-    }
-
+    // Crear datos iniciales sin foto (se actualizará después)
     const workerData = {
       houseNumber: houseNumber.toString(),
       condominio: condominio,
       nombre: workerName,
       tipo: workerType || 'general',
-      photoUrl: driveFileUrl,
-      photoDirectUrl: photoDirectUrl,
-      driveFileId: driveFileId,
+      photoUrl: null,
+      photoDirectUrl: null,
+      driveFileId: null,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
-      status: 'activo'
+      status: 'procesando' // Cambiará a 'activo' cuando la foto esté lista
     };
 
-    // Guardar en la base de datos
+    // Guardar INMEDIATAMENTE en la base de datos (sin esperar Drive)
     const result = await db.collection('workers').insertOne(workerData);
+    const workerId = result.insertedId;
 
     console.log(`✅ Trabajador/INE registrado - Casa: ${houseNumber}, Nombre: ${workerName}, Tipo: ${workerType}, Condominio: ${condominio}`);
 
+    // RESPONDER INMEDIATAMENTE al cliente (no esperar la subida a Drive)
     res.json({
       success: true,
       message: 'Trabajador registrado correctamente',
       data: {
-        id: result.insertedId,
-        ...workerData
+        id: workerId,
+        ...workerData,
+        uploadStatus: 'processing' // Indica que la foto se está subiendo en background
       }
     });
+
+    // PROCESAR FOTO EN BACKGROUND (después de responder al cliente)
+    if (photoBase64 && photoBase64.trim() !== '') {
+      // No usar await aquí - permitir que se ejecute en background
+      const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
+
+      uploadPhotoToDrive(photoBase64, fileName, condominio)
+        .then(async (driveResult) => {
+          if (driveResult) {
+            // Actualizar el documento con la información de la foto
+            await db.collection('workers').updateOne(
+              { _id: workerId },
+              {
+                $set: {
+                  photoUrl: driveResult.webViewLink,
+                  photoDirectUrl: driveResult.directUrl,
+                  driveFileId: driveResult.fileId,
+                  status: 'activo',
+                  updatedAt: new Date().toISOString()
+                }
+              }
+            );
+            console.log(`📁 Foto subida a Drive y actualizada en DB: ${driveResult.webViewLink}`);
+          } else {
+            // Si falla, marcar como activo de todas formas (pero sin foto)
+            await db.collection('workers').updateOne(
+              { _id: workerId },
+              {
+                $set: {
+                  status: 'activo',
+                  updatedAt: new Date().toISOString()
+                }
+              }
+            );
+            console.warn('⚠️ No se pudo subir foto a Drive, trabajador registrado sin foto');
+          }
+        })
+        .catch(async (error) => {
+          console.error('❌ Error en background upload:', error.message);
+          // Marcar como activo aunque falle
+          await db.collection('workers').updateOne(
+            { _id: workerId },
+            {
+              $set: {
+                status: 'activo',
+                updatedAt: new Date().toISOString()
+              }
+            }
+          );
+        });
+    } else {
+      // Sin foto, marcar como activo inmediatamente
+      await db.collection('workers').updateOne(
+        { _id: workerId },
+        { $set: { status: 'activo' } }
+      );
+    }
 
   } catch (error) {
     console.error('❌ Error registrando trabajador:', error);
@@ -1050,43 +1103,8 @@ app.post('/api/register-ine', async (req, res) => {
 
     const now = new Date();
     const timestamp = now.getTime();
-    let photoFrontalUrl = null;
-    let photoTraseraUrl = null;
-    let photoFrontalId = null;
-    let photoTraseraId = null;
-    let photoFrontalDirectUrl = null;
-    let photoTraseraDirectUrl = null;
 
-    // Subir foto frontal a Google Drive si existe
-    if (photoFrontal && photoFrontal.trim() !== '') {
-      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
-      const driveResult = await uploadPhotoToDrive(photoFrontal, fileName, condominio);
-
-      if (driveResult) {
-        photoFrontalUrl = driveResult.webViewLink;
-        photoFrontalId = driveResult.fileId;
-        photoFrontalDirectUrl = driveResult.directUrl;
-        console.log(`📁 Foto frontal subida a Drive: ${photoFrontalUrl}`);
-      } else {
-        console.warn('⚠️ No se pudo subir foto frontal a Drive');
-      }
-    }
-
-    // Subir foto trasera a Google Drive si existe
-    if (photoTrasera && photoTrasera.trim() !== '') {
-      const fileName = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
-      const driveResult = await uploadPhotoToDrive(photoTrasera, fileName, condominio);
-
-      if (driveResult) {
-        photoTraseraUrl = driveResult.webViewLink;
-        photoTraseraId = driveResult.fileId;
-        photoTraseraDirectUrl = driveResult.directUrl;
-        console.log(`📁 Foto trasera subida a Drive: ${photoTraseraUrl}`);
-      } else {
-        console.warn('⚠️ No se pudo subir foto trasera a Drive');
-      }
-    }
-
+    // Crear datos iniciales sin fotos (se actualizarán después)
     const ineData = {
       houseNumber: houseNumber.toString(),
       condominio: condominio,
@@ -1094,31 +1112,112 @@ app.post('/api/register-ine', async (req, res) => {
       apellido: apellido || '',
       numeroINE: numeroINE || '',
       curp: curp || '',
-      photoFrontalUrl: photoFrontalUrl,
-      photoFrontalDirectUrl: photoFrontalDirectUrl,
-      photoFrontalId: photoFrontalId,
-      photoTraseraUrl: photoTraseraUrl,
-      photoTraseraDirectUrl: photoTraseraDirectUrl,
-      photoTraseraId: photoTraseraId,
+      photoFrontalUrl: null,
+      photoFrontalDirectUrl: null,
+      photoFrontalId: null,
+      photoTraseraUrl: null,
+      photoTraseraDirectUrl: null,
+      photoTraseraId: null,
       observaciones: observaciones || '',
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
-      status: 'activo'
+      status: 'procesando' // Cambiará a 'activo' cuando las fotos estén listas
     };
 
-    // Guardar INE en la base de datos
+    // Guardar INMEDIATAMENTE en la base de datos (sin esperar Drive)
     const result = await db.collection('ines').insertOne(ineData);
+    const ineId = result.insertedId;
 
     console.log(`✅ INE registrado - Casa: ${houseNumber}, Nombre: ${nombre} ${apellido}, Condominio: ${condominio}`);
 
+    // RESPONDER INMEDIATAMENTE al cliente
     res.json({
       success: true,
       message: 'INE registrado correctamente',
       data: {
-        id: result.insertedId,
-        ...ineData
+        id: ineId,
+        ...ineData,
+        uploadStatus: 'processing'
       }
     });
+
+    // PROCESAR FOTOS EN BACKGROUND (PARALELO - ambas al mismo tiempo)
+    const uploadPromises = [];
+
+    if (photoFrontal && photoFrontal.trim() !== '') {
+      const fileNameFrontal = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
+      uploadPromises.push(
+        uploadPhotoToDrive(photoFrontal, fileNameFrontal, condominio)
+          .then(result => ({ type: 'frontal', result }))
+          .catch(error => ({ type: 'frontal', error: error.message }))
+      );
+    }
+
+    if (photoTrasera && photoTrasera.trim() !== '') {
+      const fileNameTrasera = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
+      uploadPromises.push(
+        uploadPhotoToDrive(photoTrasera, fileNameTrasera, condominio)
+          .then(result => ({ type: 'trasera', result }))
+          .catch(error => ({ type: 'trasera', error: error.message }))
+      );
+    }
+
+    // Subir ambas fotos EN PARALELO
+    if (uploadPromises.length > 0) {
+      Promise.all(uploadPromises)
+        .then(async (results) => {
+          const updateData = {
+            status: 'activo',
+            updatedAt: new Date().toISOString()
+          };
+
+          // Procesar resultados de las subidas
+          results.forEach(item => {
+            if (item.result && !item.error) {
+              if (item.type === 'frontal') {
+                updateData.photoFrontalUrl = item.result.webViewLink;
+                updateData.photoFrontalDirectUrl = item.result.directUrl;
+                updateData.photoFrontalId = item.result.fileId;
+                console.log(`📁 Foto frontal subida a Drive: ${item.result.webViewLink}`);
+              } else if (item.type === 'trasera') {
+                updateData.photoTraseraUrl = item.result.webViewLink;
+                updateData.photoTraseraDirectUrl = item.result.directUrl;
+                updateData.photoTraseraId = item.result.fileId;
+                console.log(`📁 Foto trasera subida a Drive: ${item.result.webViewLink}`);
+              }
+            } else {
+              console.warn(`⚠️ No se pudo subir foto ${item.type}: ${item.error || 'error desconocido'}`);
+            }
+          });
+
+          // Actualizar documento con las fotos que se subieron exitosamente
+          await db.collection('ines').updateOne(
+            { _id: ineId },
+            { $set: updateData }
+          );
+
+          console.log(`✅ INE actualizado con fotos en Drive`);
+        })
+        .catch(async (error) => {
+          console.error('❌ Error en background upload de INE:', error.message);
+          // Marcar como activo aunque fallen las fotos
+          await db.collection('ines').updateOne(
+            { _id: ineId },
+            {
+              $set: {
+                status: 'activo',
+                updatedAt: new Date().toISOString()
+              }
+            }
+          );
+        });
+    } else {
+      // Sin fotos, marcar como activo inmediatamente
+      await db.collection('ines').updateOne(
+        { _id: ineId },
+        { $set: { status: 'activo' } }
+      );
+    }
 
   } catch (error) {
     console.error('❌ Error registrando INE:', error);
