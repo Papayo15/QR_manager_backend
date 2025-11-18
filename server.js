@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
+import { google } from 'googleapis';
+import { Readable } from 'stream';
 
 dotenv.config();
 
@@ -10,10 +12,16 @@ const PORT = process.env.PORT || 3000;
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 const MONGODB_URI = process.env.MONGODB_URI;
 
+// Google Drive Configuration
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID;
+const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET;
+const OAUTH_REFRESH_TOKEN = process.env.OAUTH_REFRESH_TOKEN;
+const DRIVE_FOLDER_ID = process.env.DRIVE_FOLDER_ID;
+
 // Middleware
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Logging middleware
 app.use((req, res, next) => {
@@ -24,6 +32,86 @@ app.use((req, res, next) => {
 // Variables globales
 let db;
 let mongoClient;
+let driveClient;
+
+// ============================================
+// CONFIGURACIÓN DE GOOGLE DRIVE
+// ============================================
+
+function initializeDriveClient() {
+  try {
+    if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET || !OAUTH_REFRESH_TOKEN) {
+      console.warn('⚠️ Credenciales de Google Drive no configuradas');
+      return null;
+    }
+
+    const oauth2Client = new google.auth.OAuth2(
+      OAUTH_CLIENT_ID,
+      OAUTH_CLIENT_SECRET,
+      process.env.OAUTH_REDIRECT_URI || 'http://localhost:3000/oauth2callback'
+    );
+
+    oauth2Client.setCredentials({
+      refresh_token: OAUTH_REFRESH_TOKEN
+    });
+
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    console.log('✅ Cliente de Google Drive inicializado');
+    return drive;
+  } catch (error) {
+    console.error('❌ Error inicializando Google Drive:', error.message);
+    return null;
+  }
+}
+
+// ============================================
+// FUNCIÓN: Subir foto a Google Drive
+// ============================================
+
+async function uploadPhotoToDrive(photoBase64, fileName, metadata = {}) {
+  if (!driveClient) {
+    throw new Error('Cliente de Google Drive no disponible');
+  }
+
+  if (!DRIVE_FOLDER_ID) {
+    throw new Error('DRIVE_FOLDER_ID no configurado');
+  }
+
+  try {
+    const buffer = Buffer.from(photoBase64, 'base64');
+    const stream = Readable.from(buffer);
+
+    const fileMetadata = {
+      name: fileName,
+      parents: [DRIVE_FOLDER_ID],
+      description: JSON.stringify(metadata)
+    };
+
+    const media = {
+      mimeType: 'image/jpeg',
+      body: stream
+    };
+
+    const response = await driveClient.files.create({
+      resource: fileMetadata,
+      media: media,
+      fields: 'id, name, webViewLink, webContentLink'
+    });
+
+    console.log(`📤 Foto subida a Drive - ID: ${response.data.id} - Nombre: ${fileName}`);
+
+    return {
+      fileId: response.data.id,
+      fileName: response.data.name,
+      webViewLink: response.data.webViewLink,
+      webContentLink: response.data.webContentLink
+    };
+  } catch (error) {
+    console.error('❌ Error subiendo foto a Drive:', error.message);
+    throw error;
+  }
+}
 
 // ============================================
 // CONEXIÓN A MONGODB
@@ -48,6 +136,7 @@ async function connectToDatabase() {
       { unique: true }
     );
     await db.collection('qrCodes').createIndex({ code: 1 });
+    await db.collection('workers').createIndex({ houseNumber: 1, condominio: 1, createdAt: -1 });
 
     return db;
   } catch (error) {
@@ -115,7 +204,8 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
-    database: db ? 'connected' : 'disconnected'
+    database: db ? 'connected' : 'disconnected',
+    googleDrive: driveClient ? 'configured' : 'not configured'
   });
 });
 
@@ -498,26 +588,125 @@ app.post('/api/counters', async (req, res) => {
 });
 
 // ============================================
-// ENDPOINT: Registrar Trabajador (placeholder)
+// ENDPOINT: Registrar Trabajador
 // ============================================
 
 app.post('/api/register-worker', async (req, res) => {
   try {
     const { houseNumber, workerName, workerType, photoBase64, condominio } = req.body;
 
-    // Por ahora solo retornar éxito
-    console.log(`✅ Trabajador registrado: ${workerName} - Casa ${houseNumber}`);
+    // Validar datos requeridos
+    if (!houseNumber || !workerName || !workerType || !condominio) {
+      return res.status(400).json({
+        success: false,
+        error: 'Faltan datos requeridos: houseNumber, workerName, workerType, condominio'
+      });
+    }
 
+    if (!photoBase64) {
+      return res.status(400).json({
+        success: false,
+        error: 'La foto es requerida'
+      });
+    }
+
+    const now = new Date();
+    const timestamp = now.toISOString();
+
+    // Generar nombre de archivo único
+    const fileName = `trabajador_${condominio}_casa${houseNumber}_${workerType}_${Date.now()}.jpg`;
+
+    let driveFileData = null;
+    let workerData = {
+      houseNumber: houseNumber.toString(),
+      workerName: workerName.trim(),
+      workerType: workerType,
+      condominio: condominio,
+      createdAt: timestamp,
+      registeredAt: timestamp,
+      status: 'active'
+    };
+
+    // Intentar subir a Google Drive
+    if (driveClient && DRIVE_FOLDER_ID) {
+      try {
+        const metadata = {
+          houseNumber: houseNumber,
+          workerName: workerName,
+          workerType: workerType,
+          condominio: condominio,
+          registeredAt: timestamp
+        };
+
+        driveFileData = await uploadPhotoToDrive(photoBase64, fileName, metadata);
+
+        // Agregar información de Drive al documento
+        workerData.photo = {
+          driveFileId: driveFileData.fileId,
+          fileName: driveFileData.fileName,
+          webViewLink: driveFileData.webViewLink,
+          webContentLink: driveFileData.webContentLink,
+          uploadedAt: timestamp
+        };
+
+        console.log(`✅ Foto subida a Google Drive - Trabajador: ${workerName} - Casa: ${houseNumber}`);
+      } catch (driveError) {
+        console.error('❌ Error subiendo a Drive:', driveError.message);
+
+        // Si falla Drive, guardar en MongoDB como fallback
+        if (db) {
+          workerData.photoBase64 = photoBase64;
+          workerData.photoStoredInDB = true;
+          console.log('⚠️ Foto guardada en MongoDB como fallback');
+        } else {
+          throw new Error('No se pudo guardar la foto: Drive falló y MongoDB no disponible');
+        }
+      }
+    } else {
+      // Si Drive no está configurado, guardar en MongoDB
+      if (db) {
+        workerData.photoBase64 = photoBase64;
+        workerData.photoStoredInDB = true;
+        console.log('⚠️ Drive no configurado, guardando foto en MongoDB');
+      } else {
+        return res.status(503).json({
+          success: false,
+          error: 'Ni Google Drive ni MongoDB están disponibles para guardar la foto'
+        });
+      }
+    }
+
+    // Guardar registro en MongoDB (opcional pero recomendado)
+    let dbResult = null;
+    if (db) {
+      try {
+        dbResult = await db.collection('workers').insertOne(workerData);
+        console.log(`✅ Registro guardado en MongoDB - ID: ${dbResult.insertedId}`);
+      } catch (dbError) {
+        console.error('⚠️ Error guardando en MongoDB (no crítico):', dbError.message);
+      }
+    }
+
+    // Respuesta exitosa
     res.json({
       success: true,
-      message: 'Trabajador registrado correctamente'
+      message: 'Trabajador registrado correctamente',
+      data: {
+        id: dbResult?.insertedId || null,
+        workerName: workerName,
+        houseNumber: houseNumber,
+        workerType: workerType,
+        condominio: condominio,
+        createdAt: timestamp,
+        photo: workerData.photo || { storedInDB: true }
+      }
     });
 
   } catch (error) {
     console.error('❌ Error registrando trabajador:', error);
     res.status(500).json({
       success: false,
-      error: 'Error interno del servidor'
+      error: error.message || 'Error interno del servidor'
     });
   }
 });
@@ -560,6 +749,9 @@ app.use((err, req, res, next) => {
 
 async function startServer() {
   try {
+    // Inicializar Google Drive
+    driveClient = initializeDriveClient();
+
     // Conectar a base de datos
     await connectToDatabase();
 
@@ -568,6 +760,8 @@ async function startServer() {
       console.log(`✅ Servidor corriendo en puerto ${PORT}`);
       console.log(`🔗 URL: ${SERVER_URL}`);
       console.log(`📅 ${new Date().toISOString()}`);
+      console.log(`📂 Google Drive: ${driveClient ? '✅ Configurado' : '⚠️ No configurado'}`);
+      console.log(`💾 MongoDB: ${db ? '✅ Conectado' : '⚠️ No conectado'}`);
 
       // Iniciar keep-alive después de 2 minutos
       setTimeout(() => {
