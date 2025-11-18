@@ -32,8 +32,8 @@ let mongoClient;
 // CONFIGURACIÓN DE GOOGLE DRIVE Y SHEETS
 // ============================================
 
-const DRIVE_FOLDER_ID = '19odj_9kYCT40qb9f_YSCOCpIt5jIWPCe';
-const SPREADSHEET_ID = '1h_fEz5tDjNmdZ-57F2CoL5W6RjjAF7Yhw4ttJgypb7o';
+const DRIVE_FOLDER_ID = process.env.DRIVE_FOLDER_ID || '1FVILaIjAVPPEtR080WFjjmIRQJtUcqfI';
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1h_fEz5tDjNmdZ-57F2CoL5W6RjjAF7Yhw4ttJgypb7o';
 const SHEET_NAME = 'QR Codes'; // Nombre de la pestaña donde se guardarán los QR
 
 let driveService;
