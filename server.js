@@ -250,7 +250,7 @@ async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 
   }
 }
 
-// Función para obtener o crear pestaña por condominio
+// Función para obtener o crear pestaña por condominio (para QR codes)
 async function getOrCreateCondominioSheet(condominioName) {
   if (!sheetsService) {
     console.warn('⚠️ Google Sheets no está inicializado');
@@ -305,6 +305,183 @@ async function getOrCreateCondominioSheet(condominioName) {
     return condominioName;
   } catch (error) {
     console.error('❌ Error creando/buscando pestaña:', error.message);
+    return null;
+  }
+}
+
+// Función para obtener o crear pestaña de INE por condominio
+async function getOrCreateINESheet(condominioName) {
+  if (!sheetsService) {
+    console.warn('⚠️ Google Sheets no está inicializado');
+    return null;
+  }
+
+  try {
+    const sheetName = `${condominioName}_INE`;
+
+    // Obtener todas las pestañas existentes
+    const spreadsheet = await sheetsService.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID
+    });
+
+    // Buscar si ya existe la pestaña de INE del condominio
+    const existingSheet = spreadsheet.data.sheets.find(
+      sheet => sheet.properties.title === sheetName
+    );
+
+    if (existingSheet) {
+      console.log(`📄 Pestaña INE existente encontrada: ${sheetName}`);
+      return sheetName;
+    }
+
+    // Si no existe, crear la pestaña
+    await sheetsService.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: sheetName
+            }
+          }
+        }]
+      }
+    });
+
+    // Agregar encabezados a la nueva pestaña
+    const headers = [
+      ['Fecha Registro', 'Casa', 'Condominio', 'Nombre', 'Apellido', 'Número INE', 'CURP', 'Observaciones', 'Foto Frontal', 'Foto Trasera']
+    ];
+
+    await sheetsService.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A1:J1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: headers
+      }
+    });
+
+    console.log(`✨ Nueva pestaña INE creada: ${sheetName}`);
+    return sheetName;
+  } catch (error) {
+    console.error('❌ Error creando/buscando pestaña INE:', error.message);
+    return null;
+  }
+}
+
+// Función para registrar INE en Google Sheets
+async function registerINEInSheet(ineData) {
+  if (!sheetsService) {
+    console.warn('⚠️ Google Sheets no está inicializado');
+    return null;
+  }
+
+  try {
+    // Obtener o crear la pestaña del condominio
+    const sheetName = await getOrCreateINESheet(ineData.condominio);
+
+    if (!sheetName) {
+      console.warn('⚠️ No se pudo obtener/crear pestaña INE');
+      return null;
+    }
+
+    // Formatear fecha en hora de México
+    const fechaRegistro = formatDateForMexico(ineData.createdAt);
+
+    // Preparar los datos para la fila
+    const rowData = [
+      fechaRegistro,
+      ineData.houseNumber,
+      ineData.condominio,
+      ineData.nombre,
+      ineData.apellido || '',
+      ineData.numeroINE || '',
+      ineData.curp || '',
+      ineData.observaciones || '',
+      ineData.photoFrontalUrl || 'Procesando...',
+      ineData.photoTraseraUrl || 'Procesando...'
+    ];
+
+    // Agregar fila al final de la pestaña
+    const appendResult = await sheetsService.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A:J`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [rowData]
+      }
+    });
+
+    console.log(`📊 INE registrado en Google Sheets: ${sheetName} - ${ineData.nombre} ${ineData.apellido}`);
+
+    // Retornar info de la fila creada para poder actualizarla después
+    return {
+      sheetName: sheetName,
+      range: appendResult.data.updates.updatedRange
+    };
+  } catch (error) {
+    console.error('❌ Error registrando INE en Sheets:', error.message);
+    return null;
+  }
+}
+
+// Función para actualizar URLs de fotos en Google Sheets
+async function updateINEPhotosInSheet(ineData, sheetInfo) {
+  if (!sheetsService || !sheetInfo) {
+    return null;
+  }
+
+  try {
+    const sheetName = sheetInfo.sheetName;
+
+    // Buscar la fila que contiene este INE (por nombre, casa y condominio)
+    const response = await sheetsService.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A:J`
+    });
+
+    const rows = response.data.values;
+    if (!rows || rows.length <= 1) {
+      return null; // Solo hay encabezados
+    }
+
+    // Buscar la fila (empezando desde índice 1 para saltar encabezados)
+    let rowIndex = -1;
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      // Comparar casa, condominio y nombre
+      if (row[1] === ineData.houseNumber &&
+          row[2] === ineData.condominio &&
+          row[3] === ineData.nombre &&
+          row[4] === (ineData.apellido || '')) {
+        rowIndex = i + 1; // +1 porque Sheets usa índices 1-based
+        break;
+      }
+    }
+
+    if (rowIndex === -1) {
+      console.warn('⚠️ No se encontró la fila del INE en Sheets para actualizar fotos');
+      return null;
+    }
+
+    // Actualizar solo las columnas I y J (fotos)
+    await sheetsService.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!I${rowIndex}:J${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[
+          ineData.photoFrontalUrl || '',
+          ineData.photoTraseraUrl || ''
+        ]]
+      }
+    });
+
+    console.log(`📊 URLs de fotos actualizadas en Google Sheets: ${sheetName} fila ${rowIndex}`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error actualizando fotos en Sheets:', error.message);
     return null;
   }
 }
@@ -1141,6 +1318,16 @@ app.post('/api/register-ine', async (req, res) => {
       }
     });
 
+    // REGISTRAR EN GOOGLE SHEETS (en background, no bloquea)
+    let sheetInfo = null;
+    registerINEInSheet(ineData)
+      .then(info => {
+        sheetInfo = info;
+      })
+      .catch(err => {
+        console.error('❌ Error registrando INE en Sheets (no crítico):', err.message);
+      });
+
     // PROCESAR FOTOS EN BACKGROUND (PARALELO - ambas al mismo tiempo)
     const uploadPromises = [];
 
@@ -1197,6 +1384,17 @@ app.post('/api/register-ine', async (req, res) => {
           );
 
           console.log(`✅ INE actualizado con fotos en Drive`);
+
+          // Actualizar URLs de fotos en Google Sheets
+          if (sheetInfo && (updateData.photoFrontalUrl || updateData.photoTraseraUrl)) {
+            const updatedIneData = {
+              ...ineData,
+              ...updateData
+            };
+            updateINEPhotosInSheet(updatedIneData, sheetInfo).catch(err => {
+              console.error('❌ Error actualizando fotos en Sheets (no crítico):', err.message);
+            });
+          }
         })
         .catch(async (error) => {
           console.error('❌ Error en background upload de INE:', error.message);
