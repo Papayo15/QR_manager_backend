@@ -42,6 +42,18 @@ let sheetsService;
 // Caché de carpetas de condominios (para evitar búsquedas repetidas)
 const condominioFoldersCache = new Map();
 
+// Función para normalizar nombres de condominios (quitar acentos y caracteres especiales)
+function normalizeCondominioName(name) {
+  if (!name) return '';
+
+  return name
+    .normalize('NFD') // Descomponer caracteres acentuados
+    .replace(/[\u0300-\u036f]/g, '') // Eliminar marcas diacríticas (acentos)
+    .replace(/[^a-zA-Z0-9_]/g, '_') // Reemplazar caracteres especiales con _
+    .replace(/_+/g, '_') // Eliminar _ duplicados
+    .replace(/^_|_$/g, ''); // Eliminar _ al inicio/final
+}
+
 async function initializeGoogleServices() {
   try {
     // Verificar si tenemos credenciales OAuth (RECOMENDADO para subir archivos)
@@ -250,27 +262,35 @@ async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 
   }
 }
 
-// Función para obtener o crear pestaña por condominio (para QR codes)
-async function getOrCreateCondominioSheet(condominioName) {
+// Función para obtener o crear pestaña por condominio y casa (para QR codes)
+async function getOrCreateCondominioSheet(condominioName, houseNumber = null) {
   if (!sheetsService) {
     console.warn('⚠️ Google Sheets no está inicializado');
     return null;
   }
 
   try {
+    // Normalizar nombre del condominio
+    const condominioNormalizado = normalizeCondominioName(condominioName);
+
+    // Crear nombre de pestaña: {Condominio}_{Casa} o solo {Condominio} si no hay casa
+    const sheetName = houseNumber
+      ? `${condominioNormalizado}_${houseNumber}`
+      : condominioNormalizado;
+
     // Obtener todas las pestañas existentes
     const spreadsheet = await sheetsService.spreadsheets.get({
       spreadsheetId: SPREADSHEET_ID
     });
 
-    // Buscar si ya existe la pestaña del condominio
+    // Buscar si ya existe la pestaña
     const existingSheet = spreadsheet.data.sheets.find(
-      sheet => sheet.properties.title === condominioName
+      sheet => sheet.properties.title === sheetName
     );
 
     if (existingSheet) {
-      console.log(`📄 Pestaña existente encontrada: ${condominioName}`);
-      return condominioName;
+      console.log(`📄 Pestaña existente encontrada: ${sheetName}`);
+      return sheetName;
     }
 
     // Si no existe, crear la pestaña
@@ -280,7 +300,7 @@ async function getOrCreateCondominioSheet(condominioName) {
         requests: [{
           addSheet: {
             properties: {
-              title: condominioName
+              title: sheetName
             }
           }
         }]
@@ -294,15 +314,15 @@ async function getOrCreateCondominioSheet(condominioName) {
 
     await sheetsService.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${condominioName}!A1:J1`,
+      range: `${sheetName}!A1:J1`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: headers
       }
     });
 
-    console.log(`✨ Nueva pestaña creada: ${condominioName}`);
-    return condominioName;
+    console.log(`✨ Nueva pestaña creada: ${sheetName}`);
+    return sheetName;
   } catch (error) {
     console.error('❌ Error creando/buscando pestaña:', error.message);
     return null;
@@ -317,7 +337,9 @@ async function getOrCreateINESheet(condominioName) {
   }
 
   try {
-    const sheetName = `${condominioName}_INE`;
+    // Normalizar nombre del condominio
+    const condominioNormalizado = normalizeCondominioName(condominioName);
+    const sheetName = `${condominioNormalizado}_INE`;
 
     // Obtener todas las pestañas existentes
     const spreadsheet = await sheetsService.spreadsheets.get({
@@ -515,8 +537,9 @@ async function saveQRToSheet(qrData) {
   }
 
   try {
-    // Obtener o crear pestaña del condominio
-    const sheetName = await getOrCreateCondominioSheet(qrData.condominio);
+    // Obtener o crear pestaña por condominio y casa
+    const houseNumber = qrData.houseNumber || qrData.casa;
+    const sheetName = await getOrCreateCondominioSheet(qrData.condominio, houseNumber);
 
     if (!sheetName) {
       console.error('❌ No se pudo obtener pestaña del condominio');
@@ -1180,10 +1203,13 @@ app.post('/api/register-worker', async (req, res) => {
 
     // PROCESAR FOTO EN BACKGROUND (después de responder al cliente)
     if (photoBase64 && photoBase64.trim() !== '') {
-      // No usar await aquí - permitir que se ejecute en background
-      const fileName = `${condominio}_Casa${houseNumber}_${workerName}_${timestamp}.jpg`;
+      // Normalizar nombres para carpetas: {Tipo}_{Condominio}_{Casa}
+      const condominioNormalizado = normalizeCondominioName(condominio);
+      const tipoNormalizado = normalizeCondominioName(workerType || 'General');
+      const folderName = `${tipoNormalizado}_${condominioNormalizado}_${houseNumber}`;
+      const fileName = `${workerName}_${timestamp}.jpg`;
 
-      uploadPhotoToDrive(photoBase64, fileName, condominio)
+      uploadPhotoToDrive(photoBase64, fileName, folderName)
         .then(async (driveResult) => {
           if (driveResult) {
             // Actualizar el documento con la información de la foto
@@ -1336,19 +1362,27 @@ app.post('/api/register-ine', async (req, res) => {
     // PROCESAR FOTOS EN BACKGROUND (PARALELO - ambas al mismo tiempo)
     const uploadPromises = [];
 
+    // Determinar el tipo de trabajador (usar observaciones o "General")
+    const tipoTrabajador = (observaciones && observaciones.trim()) || 'General';
+
+    // Normalizar nombres para carpetas: {Tipo}_{Condominio}_{Casa}
+    const condominioNormalizado = normalizeCondominioName(condominio);
+    const tipoNormalizado = normalizeCondominioName(tipoTrabajador);
+    const folderName = `${tipoNormalizado}_${condominioNormalizado}_${houseNumber}`;
+
     if (photoFrontal && photoFrontal.trim() !== '') {
-      const fileNameFrontal = `${condominio}_Casa${houseNumber}_${nombre}_Frontal_${timestamp}.jpg`;
+      const fileNameFrontal = `${nombre}_Frontal_${timestamp}.jpg`;
       uploadPromises.push(
-        uploadPhotoToDrive(photoFrontal, fileNameFrontal, condominio)
+        uploadPhotoToDrive(photoFrontal, fileNameFrontal, folderName)
           .then(result => ({ type: 'frontal', result }))
           .catch(error => ({ type: 'frontal', error: error.message }))
       );
     }
 
     if (photoTrasera && photoTrasera.trim() !== '') {
-      const fileNameTrasera = `${condominio}_Casa${houseNumber}_${nombre}_Trasera_${timestamp}.jpg`;
+      const fileNameTrasera = `${nombre}_Trasera_${timestamp}.jpg`;
       uploadPromises.push(
-        uploadPhotoToDrive(photoTrasera, fileNameTrasera, condominio)
+        uploadPhotoToDrive(photoTrasera, fileNameTrasera, folderName)
           .then(result => ({ type: 'trasera', result }))
           .catch(error => ({ type: 'trasera', error: error.message }))
       );
