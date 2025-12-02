@@ -1318,15 +1318,20 @@ app.post('/api/register-ine', async (req, res) => {
       }
     });
 
-    // REGISTRAR EN GOOGLE SHEETS (en background, no bloquea)
+    // REGISTRAR EN GOOGLE SHEETS (hacerlo ANTES de las fotos para asegurar que se guarde)
     let sheetInfo = null;
-    registerINEInSheet(ineData)
-      .then(info => {
-        sheetInfo = info;
-      })
-      .catch(err => {
-        console.error('❌ Error registrando INE en Sheets (no crítico):', err.message);
-      });
+    try {
+      console.log(`📝 Intentando registrar INE en Sheets: ${condominio}_INE`);
+      sheetInfo = await registerINEInSheet(ineData);
+      if (sheetInfo) {
+        console.log(`✅ INE registrado en Google Sheets: ${sheetInfo.sheetName}`);
+      } else {
+        console.warn('⚠️ No se pudo registrar en Sheets (función retornó null)');
+      }
+    } catch (err) {
+      console.error('❌ Error registrando INE en Sheets:', err.message);
+      console.error('   Stack:', err.stack);
+    }
 
     // PROCESAR FOTOS EN BACKGROUND (PARALELO - ambas al mismo tiempo)
     const uploadPromises = [];
@@ -1468,6 +1473,114 @@ app.get('/api/get-ines', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor'
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Generar Resumen Mensual
+// ============================================
+
+app.get('/api/monthly-report', async (req, res) => {
+  try {
+    const { month, year, condominio } = req.query;
+
+    // Validar parámetros
+    if (!month || !year) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parámetros requeridos: month (1-12), year (2025)'
+      });
+    }
+
+    const monthNum = parseInt(month);
+    const yearNum = parseInt(year);
+
+    if (monthNum < 1 || monthNum > 12) {
+      return res.status(400).json({
+        success: false,
+        error: 'Mes debe estar entre 1 y 12'
+      });
+    }
+
+    // Calcular rango de fechas del mes
+    const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(yearNum, monthNum, 1, 0, 0, 0, 0));
+    const startISO = startDate.toISOString();
+    const endISO = endDate.toISOString();
+
+    console.log(`📊 Generando resumen para ${monthNum}/${yearNum} - Condominio: ${condominio || 'TODOS'}`);
+
+    const report = {
+      mes: monthNum,
+      año: yearNum,
+      condominio: condominio || 'TODOS',
+      periodo: `${startDate.toLocaleDateString('es-MX')} - ${new Date(endDate.getTime() - 1).toLocaleDateString('es-MX')}`,
+      qrCodes: { total: 0, usados: 0, expirados: 0, activos: 0 },
+      ines: { total: 0, porTipo: {} },
+      trabajadores: { total: 0, porTipo: {} }
+    };
+
+    if (!db) {
+      return res.json({
+        success: true,
+        data: report,
+        note: 'Base de datos no disponible, reporte vacío'
+      });
+    }
+
+    // Query base para filtrar por fecha y condominio
+    const baseQuery = {
+      createdAt: { $gte: startISO, $lt: endISO }
+    };
+    if (condominio) {
+      baseQuery.condominio = condominio;
+    }
+
+    // Resumen de QR Codes
+    const qrCodes = await db.collection('qrCodes').find(baseQuery).toArray();
+    report.qrCodes.total = qrCodes.length;
+    report.qrCodes.usados = qrCodes.filter(qr => qr.estado === 'usado' || qr.isUsed).length;
+    report.qrCodes.expirados = qrCodes.filter(qr => qr.estado === 'expirado').length;
+    report.qrCodes.activos = qrCodes.filter(qr => qr.estado === 'activo' || (!qr.estado && !qr.isUsed)).length;
+
+    // Resumen de INEs
+    const ines = await db.collection('ines').find(baseQuery).toArray();
+    report.ines.total = ines.length;
+
+    // Agrupar INEs por observaciones (tipo)
+    const inesPorTipo = {};
+    ines.forEach(ine => {
+      const tipo = ine.observaciones || 'Sin especificar';
+      inesPorTipo[tipo] = (inesPorTipo[tipo] || 0) + 1;
+    });
+    report.ines.porTipo = inesPorTipo;
+
+    // Resumen de Trabajadores
+    const trabajadores = await db.collection('workers').find(baseQuery).toArray();
+    report.trabajadores.total = trabajadores.length;
+
+    // Agrupar trabajadores por tipo
+    const trabajadoresPorTipo = {};
+    trabajadores.forEach(trabajador => {
+      const tipo = trabajador.tipo || 'general';
+      trabajadoresPorTipo[tipo] = (trabajadoresPorTipo[tipo] || 0) + 1;
+    });
+    report.trabajadores.porTipo = trabajadoresPorTipo;
+
+    console.log(`✅ Resumen generado: ${report.qrCodes.total} QRs, ${report.ines.total} INEs, ${report.trabajadores.total} trabajadores`);
+
+    res.json({
+      success: true,
+      data: report
+    });
+
+  } catch (error) {
+    console.error('❌ Error generando resumen mensual:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
     });
   }
 });
