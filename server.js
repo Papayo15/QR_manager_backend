@@ -5,6 +5,7 @@ import { MongoClient } from 'mongodb';
 import { google } from 'googleapis';
 import { readFileSync } from 'fs';
 import { Readable } from 'stream';
+import PDFDocument from 'pdfkit';
 
 dotenv.config();
 
@@ -1630,6 +1631,191 @@ app.get('/api/monthly-report', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error generando resumen mensual:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor',
+      details: error.message
+    });
+  }
+});
+
+// ============================================
+// ENDPOINT: Generar Resumen Mensual en PDF
+// ============================================
+
+app.get('/api/monthly-report-pdf', async (req, res) => {
+  try {
+    const { month, year, condominio } = req.query;
+
+    // Validar parámetros
+    if (!month || !year) {
+      return res.status(400).json({
+        success: false,
+        error: 'Parámetros requeridos: month (1-12), year (2025)'
+      });
+    }
+
+    const monthNum = parseInt(month);
+    const yearNum = parseInt(year);
+
+    if (monthNum < 1 || monthNum > 12) {
+      return res.status(400).json({
+        success: false,
+        error: 'Mes debe estar entre 1 y 12'
+      });
+    }
+
+    // Calcular rango de fechas del mes
+    const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
+    const endDate = new Date(Date.UTC(yearNum, monthNum, 1, 0, 0, 0, 0));
+    const startISO = startDate.toISOString();
+    const endISO = endDate.toISOString();
+
+    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+    console.log(`📄 Generando PDF para ${monthNum}/${yearNum} - Condominio: ${condominio || 'TODOS'}`);
+
+    // Query base
+    const baseQuery = {
+      createdAt: { $gte: startISO, $lt: endISO }
+    };
+    if (condominio) {
+      baseQuery.condominio = condominio;
+    }
+
+    // Obtener datos
+    let qrCodes = [], ines = [], trabajadores = [];
+
+    if (db) {
+      qrCodes = await db.collection('qrCodes').find(baseQuery).toArray();
+      ines = await db.collection('ines').find(baseQuery).toArray();
+      trabajadores = await db.collection('workers').find(baseQuery).toArray();
+    }
+
+    // Calcular estadísticas
+    const stats = {
+      qrCodes: {
+        total: qrCodes.length,
+        usados: qrCodes.filter(qr => qr.estado === 'usado' || qr.isUsed).length,
+        expirados: qrCodes.filter(qr => qr.estado === 'expirado').length,
+        activos: qrCodes.filter(qr => qr.estado === 'activo' || (!qr.estado && !qr.isUsed)).length
+      },
+      ines: {
+        total: ines.length,
+        porTipo: {}
+      },
+      trabajadores: {
+        total: trabajadores.length,
+        porTipo: {}
+      }
+    };
+
+    // Agrupar INEs por tipo
+    ines.forEach(ine => {
+      const tipo = ine.observaciones || 'Sin especificar';
+      stats.ines.porTipo[tipo] = (stats.ines.porTipo[tipo] || 0) + 1;
+    });
+
+    // Agrupar trabajadores por tipo
+    trabajadores.forEach(trabajador => {
+      const tipo = trabajador.tipo || 'general';
+      stats.trabajadores.porTipo[tipo] = (stats.trabajadores.porTipo[tipo] || 0) + 1;
+    });
+
+    // Crear PDF
+    const doc = new PDFDocument({ margin: 50, size: 'LETTER' });
+
+    // Set response headers
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=Resumen_${condominio || 'TODOS'}_${monthNames[monthNum-1]}_${yearNum}.pdf`);
+
+    // Pipe PDF a la respuesta
+    doc.pipe(res);
+
+    // Header
+    doc.fontSize(20).font('Helvetica-Bold').text('REPORTE MENSUAL DE ACTIVIDAD', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(14).font('Helvetica').text(`${monthNames[monthNum - 1]} ${yearNum}`, { align: 'center' });
+    doc.fontSize(12).text(`Condominio: ${condominio || 'TODOS'}`, { align: 'center' });
+    doc.moveDown(1);
+
+    // Línea separadora
+    doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+    doc.moveDown(1);
+
+    // Sección QR Codes
+    doc.fontSize(16).font('Helvetica-Bold').text('CÓDIGOS QR (Acceso de Visitantes)', { underline: true });
+    doc.moveDown(0.5);
+    doc.fontSize(12).font('Helvetica');
+    doc.text(`Total generados: ${stats.qrCodes.total}`, { indent: 20 });
+    doc.text(`Visitantes ingresados: ${stats.qrCodes.usados}`, { indent: 20 });
+    doc.text(`Códigos caducados: ${stats.qrCodes.expirados}`, { indent: 20 });
+    doc.text(`Códigos activos: ${stats.qrCodes.activos}`, { indent: 20 });
+    doc.moveDown(1.5);
+
+    // Sección INEs
+    doc.fontSize(16).font('Helvetica-Bold').text('TRABAJADORES/SERVICIOS REGISTRADOS (INE)', { underline: true });
+    doc.moveDown(0.5);
+    doc.fontSize(12).font('Helvetica');
+    doc.text(`Total registros: ${stats.ines.total}`, { indent: 20 });
+    doc.moveDown(0.5);
+
+    if (Object.keys(stats.ines.porTipo).length > 0) {
+      doc.fontSize(11).font('Helvetica-Bold').text('Desglose por tipo:', { indent: 20 });
+      doc.fontSize(11).font('Helvetica');
+      Object.entries(stats.ines.porTipo)
+        .sort((a, b) => b[1] - a[1]) // Ordenar de mayor a menor
+        .forEach(([tipo, count]) => {
+          doc.text(`• ${tipo}: ${count}`, { indent: 40 });
+        });
+    } else {
+      doc.fontSize(11).font('Helvetica-Oblique').text('No hay registros de INE en este periodo', { indent: 40 });
+    }
+    doc.moveDown(1.5);
+
+    // Sección Trabajadores
+    if (stats.trabajadores.total > 0) {
+      doc.fontSize(16).font('Helvetica-Bold').text('ENTREGAS/REPARTIDORES', { underline: true });
+      doc.moveDown(0.5);
+      doc.fontSize(12).font('Helvetica');
+      doc.text(`Total: ${stats.trabajadores.total}`, { indent: 20 });
+      doc.moveDown(0.5);
+
+      if (Object.keys(stats.trabajadores.porTipo).length > 0) {
+        doc.fontSize(11).font('Helvetica-Bold').text('Desglose por tipo:', { indent: 20 });
+        doc.fontSize(11).font('Helvetica');
+        Object.entries(stats.trabajadores.porTipo)
+          .sort((a, b) => b[1] - a[1])
+          .forEach(([tipo, count]) => {
+            doc.text(`• ${tipo}: ${count}`, { indent: 40 });
+          });
+      }
+      doc.moveDown(1.5);
+    }
+
+    // Footer
+    doc.moveDown(2);
+    doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+    doc.moveDown(0.5);
+    doc.fontSize(9).font('Helvetica-Oblique').text(
+      'Todas las credenciales INE están resguardadas digitalmente en Google Drive para consulta y verificación.',
+      { align: 'center' }
+    );
+    doc.moveDown(0.5);
+    doc.fontSize(10).font('Helvetica').text(
+      `Generado el ${new Date().toLocaleDateString('es-MX')} a las ${new Date().toLocaleTimeString('es-MX')}`,
+      { align: 'center' }
+    );
+    doc.fontSize(9).font('Helvetica-Oblique').text('Sistema de Gestión QR - Administración', { align: 'center' });
+
+    // Finalizar PDF
+    doc.end();
+
+    console.log(`✅ PDF generado exitosamente`);
+
+  } catch (error) {
+    console.error('❌ Error generando PDF:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor',
