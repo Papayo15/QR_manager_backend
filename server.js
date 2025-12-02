@@ -123,23 +123,20 @@ async function initializeGoogleServices() {
   }
 }
 
-// Función para obtener o crear carpeta por condominio (CON CACHÉ)
-async function getOrCreateCondominioFolder(condominioName) {
+// Función auxiliar para crear/obtener una carpeta dentro de otra
+async function getOrCreateSubfolder(parentFolderId, folderName, cacheKey = null) {
   if (!driveService) {
-    console.warn('⚠️ Google Drive no está inicializado');
     return null;
   }
 
   try {
-    // Verificar caché primero (ULTRA RÁPIDO)
-    if (condominioFoldersCache.has(condominioName)) {
-      const cachedId = condominioFoldersCache.get(condominioName);
-      console.log(`⚡ Carpeta en caché: ${condominioName} (${cachedId})`);
-      return cachedId;
+    // Verificar caché si existe cacheKey
+    if (cacheKey && condominioFoldersCache.has(cacheKey)) {
+      return condominioFoldersCache.get(cacheKey);
     }
 
-    // Buscar si ya existe la carpeta del condominio
-    const query = `name='${condominioName}' and '${DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+    // Buscar si ya existe la carpeta
+    const query = `name='${folderName}' and '${parentFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
 
     const response = await driveService.files.list({
       q: query,
@@ -147,19 +144,20 @@ async function getOrCreateCondominioFolder(condominioName) {
       spaces: 'drive'
     });
 
-    // Si existe, guardarlo en caché y retornar el ID
+    // Si existe, retornar el ID
     if (response.data.files && response.data.files.length > 0) {
       const folderId = response.data.files[0].id;
-      condominioFoldersCache.set(condominioName, folderId); // Guardar en caché
-      console.log(`📁 Carpeta existente encontrada: ${condominioName} (${folderId})`);
+      if (cacheKey) {
+        condominioFoldersCache.set(cacheKey, folderId);
+      }
       return folderId;
     }
 
     // Si no existe, crear la carpeta
     const folderMetadata = {
-      name: condominioName,
+      name: folderName,
       mimeType: 'application/vnd.google-apps.folder',
-      parents: [DRIVE_FOLDER_ID]
+      parents: [parentFolderId]
     };
 
     const folder = await driveService.files.create({
@@ -168,32 +166,61 @@ async function getOrCreateCondominioFolder(condominioName) {
     });
 
     const folderId = folder.data.id;
-    condominioFoldersCache.set(condominioName, folderId); // Guardar en caché
-    console.log(`✨ Nueva carpeta creada: ${condominioName} (${folderId})`);
-
-    // Hacer la carpeta pública (no bloquear si falla)
-    driveService.permissions.create({
-      fileId: folderId,
-      requestBody: {
-        role: 'writer',
-        type: 'anyone'
-      },
-      fields: 'id'
-    }).then(() => {
-      console.log(`🔓 Carpeta ${condominioName} configurada con permisos de escritura`);
-    }).catch(permError => {
-      console.warn(`⚠️ No se pudieron establecer permisos en la carpeta: ${permError.message}`);
-    });
+    if (cacheKey) {
+      condominioFoldersCache.set(cacheKey, folderId);
+    }
+    console.log(`📁 Carpeta creada: ${folderName}`);
 
     return folderId;
   } catch (error) {
-    console.error('❌ Error creando/buscando carpeta:', error.message);
+    console.error(`❌ Error con carpeta ${folderName}:`, error.message);
     return null;
   }
 }
 
-// Función para subir foto a Google Drive
-async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 'image/jpeg') {
+// Función para crear estructura jerárquica: Condominio > Casa > Tipo
+async function getOrCreateINEFolderStructure(condominioName, houseNumber, tipoTrabajador) {
+  try {
+    // Normalizar nombres
+    const condominioNormalizado = normalizeCondominioName(condominioName);
+    const tipoNormalizado = normalizeCondominioName(tipoTrabajador || 'General');
+
+    // 1. Carpeta del condominio
+    const condominioFolderId = await getOrCreateSubfolder(
+      DRIVE_FOLDER_ID,
+      condominioNormalizado,
+      `condo_${condominioNormalizado}`
+    );
+
+    if (!condominioFolderId) return null;
+
+    // 2. Carpeta de la casa
+    const casaFolderId = await getOrCreateSubfolder(
+      condominioFolderId,
+      `Casa_${houseNumber}`,
+      `${condominioNormalizado}_casa_${houseNumber}`
+    );
+
+    if (!casaFolderId) return null;
+
+    // 3. Carpeta del tipo de trabajador
+    const tipoFolderId = await getOrCreateSubfolder(
+      casaFolderId,
+      tipoNormalizado,
+      `${condominioNormalizado}_${houseNumber}_${tipoNormalizado}`
+    );
+
+    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${tipoNormalizado}`);
+    return tipoFolderId;
+
+  } catch (error) {
+    console.error('❌ Error creando estructura INE:', error.message);
+    return null;
+  }
+}
+
+// Función para subir foto a Google Drive (recibe folderId directamente)
+async function uploadPhotoToDrive(photoBase64, fileName, targetFolderId, mimeType = 'image/jpeg') {
   if (!driveService) {
     console.warn('⚠️ Google Drive no está inicializado');
     return null;
@@ -207,20 +234,12 @@ async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 
     // Crear stream del buffer
     const stream = Readable.from(buffer);
 
-    // Obtener o crear la carpeta del condominio
-    const condominioFolderId = await getOrCreateCondominioFolder(condominio);
-
-    // Si no se pudo obtener/crear la carpeta, subir a la carpeta principal como fallback
-    const targetFolderId = condominioFolderId || DRIVE_FOLDER_ID;
-    const finalFileName = condominioFolderId ? fileName : `${condominio}_${fileName}`;
-
-    if (!condominioFolderId) {
-      console.warn(`⚠️ No se pudo crear carpeta para ${condominio}, subiendo a carpeta principal`);
-    }
+    // Si no hay folderId, usar carpeta principal como fallback
+    const finalFolderId = targetFolderId || DRIVE_FOLDER_ID;
 
     const fileMetadata = {
-      name: finalFileName,
-      parents: [targetFolderId]
+      name: fileName,
+      parents: [finalFolderId]
     };
 
     const media = {
@@ -246,9 +265,8 @@ async function uploadPhotoToDrive(photoBase64, fileName, condominio, mimeType = 
     // Obtener URL directa de visualización
     const directUrl = `https://drive.google.com/uc?export=view&id=${file.data.id}`;
 
-    const folderInfo = condominioFolderId ? `en carpeta ${condominio}` : 'en carpeta principal';
-    console.log(`📤 Foto subida a Drive: ${file.data.id} (${finalFileName}) ${folderInfo}`);
-    console.log(`🔓 Foto pública: ${directUrl}`);
+    console.log(`📤 Foto subida: ${fileName}`);
+    console.log(`🔓 URL pública: ${directUrl}`);
 
     return {
       fileId: file.data.id,
@@ -1203,13 +1221,16 @@ app.post('/api/register-worker', async (req, res) => {
 
     // PROCESAR FOTO EN BACKGROUND (después de responder al cliente)
     if (photoBase64 && photoBase64.trim() !== '') {
-      // Normalizar nombres para carpetas: {Tipo}_{Condominio}_{Casa}
-      const condominioNormalizado = normalizeCondominioName(condominio);
-      const tipoNormalizado = normalizeCondominioName(workerType || 'General');
-      const folderName = `${tipoNormalizado}_${condominioNormalizado}_${houseNumber}`;
       const fileName = `${workerName}_${timestamp}.jpg`;
 
-      uploadPhotoToDrive(photoBase64, fileName, folderName)
+      // Crear estructura de carpetas jerárquica
+      getOrCreateINEFolderStructure(condominio, houseNumber, workerType || 'General')
+        .then(targetFolderId => {
+          if (targetFolderId) {
+            return uploadPhotoToDrive(photoBase64, fileName, targetFolderId);
+          }
+          return null;
+        })
         .then(async (driveResult) => {
           if (driveResult) {
             // Actualizar el documento con la información de la foto
@@ -1365,24 +1386,22 @@ app.post('/api/register-ine', async (req, res) => {
     // Determinar el tipo de trabajador (usar observaciones o "General")
     const tipoTrabajador = (observaciones && observaciones.trim()) || 'General';
 
-    // Normalizar nombres para carpetas: {Tipo}_{Condominio}_{Casa}
-    const condominioNormalizado = normalizeCondominioName(condominio);
-    const tipoNormalizado = normalizeCondominioName(tipoTrabajador);
-    const folderName = `${tipoNormalizado}_${condominioNormalizado}_${houseNumber}`;
+    // Crear estructura de carpetas: Condominio > Casa > Tipo
+    const targetFolderId = await getOrCreateINEFolderStructure(condominio, houseNumber, tipoTrabajador);
 
-    if (photoFrontal && photoFrontal.trim() !== '') {
+    if (photoFrontal && photoFrontal.trim() !== '' && targetFolderId) {
       const fileNameFrontal = `${nombre}_Frontal_${timestamp}.jpg`;
       uploadPromises.push(
-        uploadPhotoToDrive(photoFrontal, fileNameFrontal, folderName)
+        uploadPhotoToDrive(photoFrontal, fileNameFrontal, targetFolderId)
           .then(result => ({ type: 'frontal', result }))
           .catch(error => ({ type: 'frontal', error: error.message }))
       );
     }
 
-    if (photoTrasera && photoTrasera.trim() !== '') {
+    if (photoTrasera && photoTrasera.trim() !== '' && targetFolderId) {
       const fileNameTrasera = `${nombre}_Trasera_${timestamp}.jpg`;
       uploadPromises.push(
-        uploadPhotoToDrive(photoTrasera, fileNameTrasera, folderName)
+        uploadPhotoToDrive(photoTrasera, fileNameTrasera, targetFolderId)
           .then(result => ({ type: 'trasera', result }))
           .catch(error => ({ type: 'trasera', error: error.message }))
       );
