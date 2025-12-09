@@ -179,7 +179,8 @@ async function getOrCreateSubfolder(parentFolderId, folderName, cacheKey = null)
   }
 }
 
-// Función para crear estructura jerárquica: Condominio > Casa > Año > Mes > Dia
+// Función para crear estructura jerárquica: Condominio > Casa > Año > Mes
+// Retorna: { folderId, day } - el día se incluirá en el nombre del archivo
 async function getOrCreateINEFolderStructure(condominioName, houseNumber, registrationDate = new Date()) {
   try {
     // Normalizar nombres
@@ -218,7 +219,7 @@ async function getOrCreateINEFolderStructure(condominioName, houseNumber, regist
 
     if (!yearFolderId) return null;
 
-    // 4. Carpeta del mes
+    // 4. Carpeta del mes (última carpeta)
     const monthFolderId = await getOrCreateSubfolder(
       yearFolderId,
       month,
@@ -227,15 +228,10 @@ async function getOrCreateINEFolderStructure(condominioName, houseNumber, regist
 
     if (!monthFolderId) return null;
 
-    // 5. Carpeta del día
-    const dayFolderId = await getOrCreateSubfolder(
-      monthFolderId,
-      day,
-      `${condominioNormalizado}_${houseNumber}_${year}_${month}_${day}`
-    );
+    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${year}/${month}`);
 
-    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${year}/${month}/${day}`);
-    return dayFolderId;
+    // Retornar el folderId del mes y el día para incluirlo en el nombre del archivo
+    return { folderId: monthFolderId, day };
 
   } catch (error) {
     console.error('❌ Error creando estructura INE:', error.message);
@@ -316,58 +312,48 @@ async function generateMonthlyReportFromDrive(month, year, condominioFilter = nu
 
         console.log(`    🏠 Casa ${casaNumber} - Mes ${monthStr}/${yearStr}`);
 
-        // 5. Listar todas las carpetas de días del mes
-        const daysFiles = await listFilesInFolder(monthFolder.id);
-        const dayFolders = daysFiles.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+        // 5. Listar archivos directamente en la carpeta del mes
+        const filesInMonth = await listFilesInFolder(monthFolder.id);
+        const imageFiles = filesInMonth.filter(f => f.mimeType && f.mimeType.startsWith('image/'));
 
-        for (const dayFolder of dayFolders) {
-          const dayNumber = dayFolder.name;
+        for (const file of imageFiles) {
+          // Extraer información del nombre del archivo
+          // Formato: Nombre_Apellido_Tipo_Dia09_Frontal_timestamp.jpg
+          const parts = file.name.split('_');
 
-          // 6. Listar archivos del día
-          const filesInDay = await listFilesInFolder(dayFolder.id);
-          const imageFiles = filesInDay.filter(f => f.mimeType && f.mimeType.startsWith('image/'));
+          let tipoEmpleado = 'General';
+          let nombreEmpleado = parts[0] || 'Desconocido';
+          let diaDelMes = '??';
 
-          for (const file of imageFiles) {
-            // Extraer información del nombre del archivo
-            // Formato: NombreCompleto_TipoEmpleado_Frontal_timestamp.jpg
-            const parts = file.name.split('_');
+          // Intentar extraer tipo y día del nombre del archivo
+          // Buscar parte que empiece con "Dia"
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i].startsWith('Dia') && parts[i].length >= 5) {
+              // Extraer día: "Dia09" -> "09"
+              diaDelMes = parts[i].substring(3, 5);
 
-            let tipoEmpleado = 'General';
-            let nombreEmpleado = parts[0] || 'Desconocido';
-
-            // Intentar extraer tipo del nombre del archivo
-            if (parts.length >= 3) {
-              // Si hay al menos 3 partes, la penúltima es el tipo
-              // parts = [Nombre, Apellido, Tipo, Frontal/Trasera, timestamp.jpg]
-              // O: [Nombre, Tipo, Frontal/Trasera, timestamp.jpg]
-              const lado = parts[parts.length - 2]; // "Frontal" o "Trasera"
-
-              if (lado === 'Frontal' || lado === 'Trasera') {
-                // Encontrar el tipo (está antes del lado)
-                for (let i = parts.length - 3; i >= 0; i--) {
-                  if (parts[i] !== nombreEmpleado && parts[i] !== parts[1]) {
-                    tipoEmpleado = parts[i];
-                    break;
-                  }
-                }
+              // El tipo está justo antes de "DiaXX"
+              if (i > 0) {
+                tipoEmpleado = parts[i - 1];
               }
+              break;
             }
+          }
 
-            // Solo contar fotos frontales para evitar duplicados
-            if (file.name.includes('_Frontal_')) {
-              report.total++;
-              report.porTipo[tipoEmpleado] = (report.porTipo[tipoEmpleado] || 0) + 1;
-              report.porCasa[casaNumber] = (report.porCasa[casaNumber] || 0) + 1;
+          // Solo contar fotos frontales para evitar duplicados
+          if (file.name.includes('_Frontal_')) {
+            report.total++;
+            report.porTipo[tipoEmpleado] = (report.porTipo[tipoEmpleado] || 0) + 1;
+            report.porCasa[casaNumber] = (report.porCasa[casaNumber] || 0) + 1;
 
-              report.archivos.push({
-                nombre: file.name,
-                condominio: condominioName,
-                casa: casaNumber,
-                dia: dayNumber,
-                tipo: tipoEmpleado,
-                fecha: `${yearStr}-${monthStr}-${dayNumber}`
-              });
-            }
+            report.archivos.push({
+              nombre: file.name,
+              condominio: condominioName,
+              casa: casaNumber,
+              dia: diaDelMes,
+              tipo: tipoEmpleado,
+              fecha: `${yearStr}-${monthStr}-${diaDelMes}`
+            });
           }
         }
       }
@@ -1385,14 +1371,15 @@ app.post('/api/register-worker', async (req, res) => {
     // PROCESAR FOTO EN BACKGROUND (después de responder al cliente)
     if (photoBase64 && photoBase64.trim() !== '') {
       const workerTypeNormalized = normalizeCondominioName(workerType || 'General');
-      const fileName = `${workerName}_${workerTypeNormalized}_${timestamp}.jpg`;
 
       // Crear estructura de carpetas jerárquica con fechas
       const currentDate = new Date();
       getOrCreateINEFolderStructure(condominio, houseNumber, currentDate)
-        .then(targetFolderId => {
-          if (targetFolderId) {
-            return uploadPhotoToDrive(photoBase64, fileName, targetFolderId);
+        .then(folderResult => {
+          if (folderResult) {
+            // Nombre del archivo: Nombre_Tipo_Dia_timestamp.jpg
+            const fileName = `${workerName}_${workerTypeNormalized}_Dia${folderResult.day}_${timestamp}.jpg`;
+            return uploadPhotoToDrive(photoBase64, fileName, folderResult.folderId);
           }
           return null;
         })
@@ -1552,27 +1539,27 @@ app.post('/api/register-ine', async (req, res) => {
     const tipoTrabajador = (observaciones && observaciones.trim()) || 'General';
     const tipoNormalizado = normalizeCondominioName(tipoTrabajador);
 
-    // Crear estructura de carpetas: Condominio > Casa > Año > Mes > Dia
+    // Crear estructura de carpetas: Condominio > Casa > Año > Mes
     const currentDate = new Date();
-    const targetFolderId = await getOrCreateINEFolderStructure(condominio, houseNumber, currentDate);
+    const folderResult = await getOrCreateINEFolderStructure(condominio, houseNumber, currentDate);
 
-    if (photoFrontal && photoFrontal.trim() !== '' && targetFolderId) {
-      // Nombre del archivo: NombreCompleto_TipoEmpleado_Frontal_timestamp.jpg
+    if (photoFrontal && photoFrontal.trim() !== '' && folderResult) {
+      // Nombre del archivo: Nombre_Apellido_Tipo_Dia_Frontal_timestamp.jpg
       const nombreCompleto = `${nombre}_${apellido || ''}`.replace(/\s+/g, '_');
-      const fileNameFrontal = `${nombreCompleto}_${tipoNormalizado}_Frontal_${timestamp}.jpg`;
+      const fileNameFrontal = `${nombreCompleto}_${tipoNormalizado}_Dia${folderResult.day}_Frontal_${timestamp}.jpg`;
       uploadPromises.push(
-        uploadPhotoToDrive(photoFrontal, fileNameFrontal, targetFolderId)
+        uploadPhotoToDrive(photoFrontal, fileNameFrontal, folderResult.folderId)
           .then(result => ({ type: 'frontal', result }))
           .catch(error => ({ type: 'frontal', error: error.message }))
       );
     }
 
-    if (photoTrasera && photoTrasera.trim() !== '' && targetFolderId) {
-      // Nombre del archivo: NombreCompleto_TipoEmpleado_Trasera_timestamp.jpg
+    if (photoTrasera && photoTrasera.trim() !== '' && folderResult) {
+      // Nombre del archivo: Nombre_Apellido_Tipo_Dia_Trasera_timestamp.jpg
       const nombreCompleto = `${nombre}_${apellido || ''}`.replace(/\s+/g, '_');
-      const fileNameTrasera = `${nombreCompleto}_${tipoNormalizado}_Trasera_${timestamp}.jpg`;
+      const fileNameTrasera = `${nombreCompleto}_${tipoNormalizado}_Dia${folderResult.day}_Trasera_${timestamp}.jpg`;
       uploadPromises.push(
-        uploadPhotoToDrive(photoTrasera, fileNameTrasera, targetFolderId)
+        uploadPhotoToDrive(photoTrasera, fileNameTrasera, folderResult.folderId)
           .then(result => ({ type: 'trasera', result }))
           .catch(error => ({ type: 'trasera', error: error.message }))
       );
