@@ -189,8 +189,12 @@ async function getOrCreateINEFolderStructure(condominioName, houseNumber, regist
     // Obtener fecha de registro (timezone México)
     const mexicoDate = new Date(registrationDate.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
     const year = mexicoDate.getFullYear();
-    const month = String(mexicoDate.getMonth() + 1).padStart(2, '0'); // 01-12
+    const monthNumber = mexicoDate.getMonth() + 1; // 1-12
     const day = String(mexicoDate.getDate()).padStart(2, '0'); // 01-31
+
+    // Nombres de meses en español (3 letras)
+    const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const monthText = monthNames[monthNumber - 1]; // "Ene", "Feb", etc.
 
     // 1. Carpeta del condominio
     const condominioFolderId = await getOrCreateSubfolder(
@@ -219,16 +223,16 @@ async function getOrCreateINEFolderStructure(condominioName, houseNumber, regist
 
     if (!yearFolderId) return null;
 
-    // 4. Carpeta del mes (última carpeta)
+    // 4. Carpeta del mes (última carpeta) - usar texto en lugar de número
     const monthFolderId = await getOrCreateSubfolder(
       yearFolderId,
-      month,
-      `${condominioNormalizado}_${houseNumber}_${year}_${month}`
+      monthText,
+      `${condominioNormalizado}_${houseNumber}_${year}_${monthText}`
     );
 
     if (!monthFolderId) return null;
 
-    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${year}/${month}`);
+    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${year}/${monthText}`);
 
     // Retornar el folderId del mes y el día para incluirlo en el nombre del archivo
     return { folderId: monthFolderId, day };
@@ -264,10 +268,15 @@ async function generateMonthlyReportFromDrive(month, year, condominioFilter = nu
     return { total: 0, porTipo: {}, porCasa: {}, archivos: [] };
   }
 
-  const monthStr = String(month).padStart(2, '0');
+  const monthNumber = parseInt(month);
   const yearStr = String(year);
 
-  console.log(`📊 Escaneando Drive para ${yearStr}/${monthStr}...`);
+  // Nombres de meses en español (3 letras)
+  const monthNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const monthText = monthNames[monthNumber - 1]; // "Ene", "Feb", etc.
+  const monthStr = String(monthNumber).padStart(2, '0'); // "01", "02", etc. (para las fechas)
+
+  console.log(`📊 Escaneando Drive para ${yearStr}/${monthText}...`);
 
   const report = {
     total: 0,
@@ -304,13 +313,13 @@ async function generateMonthlyReportFromDrive(month, year, condominioFilter = nu
 
         if (!yearFolder) continue;
 
-        // 4. Buscar carpeta del mes
+        // 4. Buscar carpeta del mes (ahora con texto: "Ene", "Feb", etc.)
         const monthsFiles = await listFilesInFolder(yearFolder.id);
-        const monthFolder = monthsFiles.find(f => f.name === monthStr && f.mimeType === 'application/vnd.google-apps.folder');
+        const monthFolder = monthsFiles.find(f => f.name === monthText && f.mimeType === 'application/vnd.google-apps.folder');
 
         if (!monthFolder) continue;
 
-        console.log(`    🏠 Casa ${casaNumber} - Mes ${monthStr}/${yearStr}`);
+        console.log(`    🏠 Casa ${casaNumber} - Mes ${monthText}/${yearStr}`);
 
         // 5. Listar archivos directamente en la carpeta del mes
         const filesInMonth = await listFilesInFolder(monthFolder.id);
