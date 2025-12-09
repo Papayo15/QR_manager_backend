@@ -179,12 +179,17 @@ async function getOrCreateSubfolder(parentFolderId, folderName, cacheKey = null)
   }
 }
 
-// Función para crear estructura jerárquica: Condominio > Casa > Tipo
-async function getOrCreateINEFolderStructure(condominioName, houseNumber, tipoTrabajador) {
+// Función para crear estructura jerárquica: Condominio > Casa > Año > Mes > Dia
+async function getOrCreateINEFolderStructure(condominioName, houseNumber, registrationDate = new Date()) {
   try {
     // Normalizar nombres
     const condominioNormalizado = normalizeCondominioName(condominioName);
-    const tipoNormalizado = normalizeCondominioName(tipoTrabajador || 'General');
+
+    // Obtener fecha de registro (timezone México)
+    const mexicoDate = new Date(registrationDate.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const year = mexicoDate.getFullYear();
+    const month = String(mexicoDate.getMonth() + 1).padStart(2, '0'); // 01-12
+    const day = String(mexicoDate.getDate()).padStart(2, '0'); // 01-31
 
     // 1. Carpeta del condominio
     const condominioFolderId = await getOrCreateSubfolder(
@@ -204,15 +209,33 @@ async function getOrCreateINEFolderStructure(condominioName, houseNumber, tipoTr
 
     if (!casaFolderId) return null;
 
-    // 3. Carpeta del tipo de trabajador
-    const tipoFolderId = await getOrCreateSubfolder(
+    // 3. Carpeta del año
+    const yearFolderId = await getOrCreateSubfolder(
       casaFolderId,
-      tipoNormalizado,
-      `${condominioNormalizado}_${houseNumber}_${tipoNormalizado}`
+      String(year),
+      `${condominioNormalizado}_${houseNumber}_${year}`
     );
 
-    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${tipoNormalizado}`);
-    return tipoFolderId;
+    if (!yearFolderId) return null;
+
+    // 4. Carpeta del mes
+    const monthFolderId = await getOrCreateSubfolder(
+      yearFolderId,
+      month,
+      `${condominioNormalizado}_${houseNumber}_${year}_${month}`
+    );
+
+    if (!monthFolderId) return null;
+
+    // 5. Carpeta del día
+    const dayFolderId = await getOrCreateSubfolder(
+      monthFolderId,
+      day,
+      `${condominioNormalizado}_${houseNumber}_${year}_${month}_${day}`
+    );
+
+    console.log(`✅ Ruta: ${condominioNormalizado}/Casa_${houseNumber}/${year}/${month}/${day}`);
+    return dayFolderId;
 
   } catch (error) {
     console.error('❌ Error creando estructura INE:', error.message);
@@ -1222,10 +1245,12 @@ app.post('/api/register-worker', async (req, res) => {
 
     // PROCESAR FOTO EN BACKGROUND (después de responder al cliente)
     if (photoBase64 && photoBase64.trim() !== '') {
-      const fileName = `${workerName}_${timestamp}.jpg`;
+      const workerTypeNormalized = normalizeCondominioName(workerType || 'General');
+      const fileName = `${workerName}_${workerTypeNormalized}_${timestamp}.jpg`;
 
-      // Crear estructura de carpetas jerárquica
-      getOrCreateINEFolderStructure(condominio, houseNumber, workerType || 'General')
+      // Crear estructura de carpetas jerárquica con fechas
+      const currentDate = new Date();
+      getOrCreateINEFolderStructure(condominio, houseNumber, currentDate)
         .then(targetFolderId => {
           if (targetFolderId) {
             return uploadPhotoToDrive(photoBase64, fileName, targetFolderId);
@@ -1386,12 +1411,16 @@ app.post('/api/register-ine', async (req, res) => {
 
     // Determinar el tipo de trabajador (usar observaciones o "General")
     const tipoTrabajador = (observaciones && observaciones.trim()) || 'General';
+    const tipoNormalizado = normalizeCondominioName(tipoTrabajador);
 
-    // Crear estructura de carpetas: Condominio > Casa > Tipo
-    const targetFolderId = await getOrCreateINEFolderStructure(condominio, houseNumber, tipoTrabajador);
+    // Crear estructura de carpetas: Condominio > Casa > Año > Mes > Dia
+    const currentDate = new Date();
+    const targetFolderId = await getOrCreateINEFolderStructure(condominio, houseNumber, currentDate);
 
     if (photoFrontal && photoFrontal.trim() !== '' && targetFolderId) {
-      const fileNameFrontal = `${nombre}_Frontal_${timestamp}.jpg`;
+      // Nombre del archivo: NombreCompleto_TipoEmpleado_Frontal_timestamp.jpg
+      const nombreCompleto = `${nombre}_${apellido || ''}`.replace(/\s+/g, '_');
+      const fileNameFrontal = `${nombreCompleto}_${tipoNormalizado}_Frontal_${timestamp}.jpg`;
       uploadPromises.push(
         uploadPhotoToDrive(photoFrontal, fileNameFrontal, targetFolderId)
           .then(result => ({ type: 'frontal', result }))
@@ -1400,7 +1429,9 @@ app.post('/api/register-ine', async (req, res) => {
     }
 
     if (photoTrasera && photoTrasera.trim() !== '' && targetFolderId) {
-      const fileNameTrasera = `${nombre}_Trasera_${timestamp}.jpg`;
+      // Nombre del archivo: NombreCompleto_TipoEmpleado_Trasera_timestamp.jpg
+      const nombreCompleto = `${nombre}_${apellido || ''}`.replace(/\s+/g, '_');
+      const fileNameTrasera = `${nombreCompleto}_${tipoNormalizado}_Trasera_${timestamp}.jpg`;
       uploadPromises.push(
         uploadPhotoToDrive(photoTrasera, fileNameTrasera, targetFolderId)
           .then(result => ({ type: 'trasera', result }))
