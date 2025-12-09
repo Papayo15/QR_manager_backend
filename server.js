@@ -243,6 +243,145 @@ async function getOrCreateINEFolderStructure(condominioName, houseNumber, regist
   }
 }
 
+// Función para listar archivos dentro de una carpeta de Drive
+async function listFilesInFolder(folderId) {
+  if (!driveService) return [];
+
+  try {
+    const query = `'${folderId}' in parents and trashed=false`;
+    const response = await driveService.files.list({
+      q: query,
+      fields: 'files(id, name, mimeType, createdTime)',
+      spaces: 'drive'
+    });
+
+    return response.data.files || [];
+  } catch (error) {
+    console.error(`Error listando archivos en carpeta ${folderId}:`, error.message);
+    return [];
+  }
+}
+
+// Función para generar reporte mensual escaneando Drive
+async function generateMonthlyReportFromDrive(month, year, condominioFilter = null) {
+  if (!driveService) {
+    return { total: 0, porTipo: {}, porCasa: {}, archivos: [] };
+  }
+
+  const monthStr = String(month).padStart(2, '0');
+  const yearStr = String(year);
+
+  console.log(`📊 Escaneando Drive para ${yearStr}/${monthStr}...`);
+
+  const report = {
+    total: 0,
+    porTipo: {},
+    porCasa: {},
+    archivos: []
+  };
+
+  try {
+    // 1. Listar carpetas de condominios
+    const condominiosFiles = await listFilesInFolder(DRIVE_FOLDER_ID);
+    const condominioFolders = condominiosFiles.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+    for (const condominioFolder of condominioFolders) {
+      const condominioName = condominioFolder.name;
+
+      // Si hay filtro de condominio, saltar si no coincide
+      if (condominioFilter && condominioName.toLowerCase() !== normalizeCondominioName(condominioFilter).toLowerCase()) {
+        continue;
+      }
+
+      console.log(`  📁 Condominio: ${condominioName}`);
+
+      // 2. Listar carpetas de casas
+      const casasFiles = await listFilesInFolder(condominioFolder.id);
+      const casaFolders = casasFiles.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+      for (const casaFolder of casaFolders) {
+        const casaNumber = casaFolder.name.replace('Casa_', '');
+
+        // 3. Buscar carpeta del año
+        const yearsFiles = await listFilesInFolder(casaFolder.id);
+        const yearFolder = yearsFiles.find(f => f.name === yearStr && f.mimeType === 'application/vnd.google-apps.folder');
+
+        if (!yearFolder) continue;
+
+        // 4. Buscar carpeta del mes
+        const monthsFiles = await listFilesInFolder(yearFolder.id);
+        const monthFolder = monthsFiles.find(f => f.name === monthStr && f.mimeType === 'application/vnd.google-apps.folder');
+
+        if (!monthFolder) continue;
+
+        console.log(`    🏠 Casa ${casaNumber} - Mes ${monthStr}/${yearStr}`);
+
+        // 5. Listar todas las carpetas de días del mes
+        const daysFiles = await listFilesInFolder(monthFolder.id);
+        const dayFolders = daysFiles.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+        for (const dayFolder of dayFolders) {
+          const dayNumber = dayFolder.name;
+
+          // 6. Listar archivos del día
+          const filesInDay = await listFilesInFolder(dayFolder.id);
+          const imageFiles = filesInDay.filter(f => f.mimeType && f.mimeType.startsWith('image/'));
+
+          for (const file of imageFiles) {
+            // Extraer información del nombre del archivo
+            // Formato: NombreCompleto_TipoEmpleado_Frontal_timestamp.jpg
+            const parts = file.name.split('_');
+
+            let tipoEmpleado = 'General';
+            let nombreEmpleado = parts[0] || 'Desconocido';
+
+            // Intentar extraer tipo del nombre del archivo
+            if (parts.length >= 3) {
+              // Si hay al menos 3 partes, la penúltima es el tipo
+              // parts = [Nombre, Apellido, Tipo, Frontal/Trasera, timestamp.jpg]
+              // O: [Nombre, Tipo, Frontal/Trasera, timestamp.jpg]
+              const lado = parts[parts.length - 2]; // "Frontal" o "Trasera"
+
+              if (lado === 'Frontal' || lado === 'Trasera') {
+                // Encontrar el tipo (está antes del lado)
+                for (let i = parts.length - 3; i >= 0; i--) {
+                  if (parts[i] !== nombreEmpleado && parts[i] !== parts[1]) {
+                    tipoEmpleado = parts[i];
+                    break;
+                  }
+                }
+              }
+            }
+
+            // Solo contar fotos frontales para evitar duplicados
+            if (file.name.includes('_Frontal_')) {
+              report.total++;
+              report.porTipo[tipoEmpleado] = (report.porTipo[tipoEmpleado] || 0) + 1;
+              report.porCasa[casaNumber] = (report.porCasa[casaNumber] || 0) + 1;
+
+              report.archivos.push({
+                nombre: file.name,
+                condominio: condominioName,
+                casa: casaNumber,
+                dia: dayNumber,
+                tipo: tipoEmpleado,
+                fecha: `${yearStr}-${monthStr}-${dayNumber}`
+              });
+            }
+          }
+        }
+      }
+    }
+
+    console.log(`✅ Reporte generado desde Drive: ${report.total} registros`);
+    return report;
+
+  } catch (error) {
+    console.error('❌ Error generando reporte desde Drive:', error.message);
+    return report;
+  }
+}
+
 // Función para subir foto a Google Drive (recibe folderId directamente)
 async function uploadPhotoToDrive(photoBase64, fileName, targetFolderId, mimeType = 'image/jpeg') {
   if (!driveService) {
@@ -1588,72 +1727,28 @@ app.get('/api/monthly-report', async (req, res) => {
       });
     }
 
-    // Calcular rango de fechas del mes
+    console.log(`📊 Generando resumen desde Drive para ${monthNum}/${yearNum} - Condominio: ${condominio || 'TODOS'}`);
+
+    // Generar reporte desde Drive
+    const driveReport = await generateMonthlyReportFromDrive(monthNum, yearNum, condominio);
+
     const startDate = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
     const endDate = new Date(Date.UTC(yearNum, monthNum, 1, 0, 0, 0, 0));
-    const startISO = startDate.toISOString();
-    const endISO = endDate.toISOString();
-
-    console.log(`📊 Generando resumen para ${monthNum}/${yearNum} - Condominio: ${condominio || 'TODOS'}`);
 
     const report = {
       mes: monthNum,
       año: yearNum,
       condominio: condominio || 'TODOS',
       periodo: `${startDate.toLocaleDateString('es-MX')} - ${new Date(endDate.getTime() - 1).toLocaleDateString('es-MX')}`,
-      qrCodes: { total: 0, usados: 0, expirados: 0, activos: 0 },
-      ines: { total: 0, porTipo: {} },
-      trabajadores: { total: 0, porTipo: {} }
+      registros: {
+        total: driveReport.total,
+        porTipo: driveReport.porTipo,
+        porCasa: driveReport.porCasa
+      },
+      detalles: driveReport.archivos
     };
 
-    if (!db) {
-      return res.json({
-        success: true,
-        data: report,
-        note: 'Base de datos no disponible, reporte vacío'
-      });
-    }
-
-    // Query base para filtrar por fecha y condominio
-    const baseQuery = {
-      createdAt: { $gte: startISO, $lt: endISO }
-    };
-    if (condominio) {
-      baseQuery.condominio = condominio;
-    }
-
-    // Resumen de QR Codes
-    const qrCodes = await db.collection('qrCodes').find(baseQuery).toArray();
-    report.qrCodes.total = qrCodes.length;
-    report.qrCodes.usados = qrCodes.filter(qr => qr.estado === 'usado' || qr.isUsed).length;
-    report.qrCodes.expirados = qrCodes.filter(qr => qr.estado === 'expirado').length;
-    report.qrCodes.activos = qrCodes.filter(qr => qr.estado === 'activo' || (!qr.estado && !qr.isUsed)).length;
-
-    // Resumen de INEs
-    const ines = await db.collection('ines').find(baseQuery).toArray();
-    report.ines.total = ines.length;
-
-    // Agrupar INEs por observaciones (tipo)
-    const inesPorTipo = {};
-    ines.forEach(ine => {
-      const tipo = ine.observaciones || 'Sin especificar';
-      inesPorTipo[tipo] = (inesPorTipo[tipo] || 0) + 1;
-    });
-    report.ines.porTipo = inesPorTipo;
-
-    // Resumen de Trabajadores
-    const trabajadores = await db.collection('workers').find(baseQuery).toArray();
-    report.trabajadores.total = trabajadores.length;
-
-    // Agrupar trabajadores por tipo
-    const trabajadoresPorTipo = {};
-    trabajadores.forEach(trabajador => {
-      const tipo = trabajador.tipo || 'general';
-      trabajadoresPorTipo[tipo] = (trabajadoresPorTipo[tipo] || 0) + 1;
-    });
-    report.trabajadores.porTipo = trabajadoresPorTipo;
-
-    console.log(`✅ Resumen generado: ${report.qrCodes.total} QRs, ${report.ines.total} INEs, ${report.trabajadores.total} trabajadores`);
+    console.log(`✅ Resumen generado desde Drive: ${driveReport.total} registros`);
 
     res.json({
       success: true,
@@ -1705,54 +1800,19 @@ app.get('/api/monthly-report-pdf', async (req, res) => {
     const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
                         'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 
-    console.log(`📄 Generando PDF para ${monthNum}/${yearNum} - Condominio: ${condominio || 'TODOS'}`);
+    console.log(`📄 Generando PDF desde Drive para ${monthNum}/${yearNum} - Condominio: ${condominio || 'TODOS'}`);
 
-    // Query base
-    const baseQuery = {
-      createdAt: { $gte: startISO, $lt: endISO }
-    };
-    if (condominio) {
-      baseQuery.condominio = condominio;
-    }
-
-    // Obtener datos
-    let qrCodes = [], ines = [], trabajadores = [];
-
-    if (db) {
-      qrCodes = await db.collection('qrCodes').find(baseQuery).toArray();
-      ines = await db.collection('ines').find(baseQuery).toArray();
-      trabajadores = await db.collection('workers').find(baseQuery).toArray();
-    }
+    // Generar reporte desde Drive
+    const driveReport = await generateMonthlyReportFromDrive(monthNum, yearNum, condominio);
 
     // Calcular estadísticas
     const stats = {
-      qrCodes: {
-        total: qrCodes.length,
-        usados: qrCodes.filter(qr => qr.estado === 'usado' || qr.isUsed).length,
-        expirados: qrCodes.filter(qr => qr.estado === 'expirado').length,
-        activos: qrCodes.filter(qr => qr.estado === 'activo' || (!qr.estado && !qr.isUsed)).length
-      },
-      ines: {
-        total: ines.length,
-        porTipo: {}
-      },
-      trabajadores: {
-        total: trabajadores.length,
-        porTipo: {}
+      registros: {
+        total: driveReport.total,
+        porTipo: driveReport.porTipo,
+        porCasa: driveReport.porCasa
       }
     };
-
-    // Agrupar INEs por tipo
-    ines.forEach(ine => {
-      const tipo = ine.observaciones || 'Sin especificar';
-      stats.ines.porTipo[tipo] = (stats.ines.porTipo[tipo] || 0) + 1;
-    });
-
-    // Agrupar trabajadores por tipo
-    trabajadores.forEach(trabajador => {
-      const tipo = trabajador.tipo || 'general';
-      stats.trabajadores.porTipo[tipo] = (stats.trabajadores.porTipo[tipo] || 0) + 1;
-    });
 
     // Crear PDF
     const doc = new PDFDocument({ margin: 50, size: 'LETTER' });
@@ -1775,53 +1835,44 @@ app.get('/api/monthly-report-pdf', async (req, res) => {
     doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
     doc.moveDown(1);
 
-    // Sección QR Codes
-    doc.fontSize(16).font('Helvetica-Bold').text('CÓDIGOS QR (Acceso de Visitantes)', { underline: true });
+    // Sección Registros
+    doc.fontSize(16).font('Helvetica-Bold').text('TRABAJADORES/SERVICIOS REGISTRADOS', { underline: true });
     doc.moveDown(0.5);
     doc.fontSize(12).font('Helvetica');
-    doc.text(`Total generados: ${stats.qrCodes.total}`, { indent: 20 });
-    doc.text(`Visitantes ingresados: ${stats.qrCodes.usados}`, { indent: 20 });
-    doc.text(`Códigos caducados: ${stats.qrCodes.expirados}`, { indent: 20 });
-    doc.text(`Códigos activos: ${stats.qrCodes.activos}`, { indent: 20 });
-    doc.moveDown(1.5);
+    doc.text(`Total de registros del mes: ${stats.registros.total}`, { indent: 20 });
+    doc.moveDown(1);
 
-    // Sección INEs
-    doc.fontSize(16).font('Helvetica-Bold').text('TRABAJADORES/SERVICIOS REGISTRADOS (INE)', { underline: true });
-    doc.moveDown(0.5);
-    doc.fontSize(12).font('Helvetica');
-    doc.text(`Total registros: ${stats.ines.total}`, { indent: 20 });
-    doc.moveDown(0.5);
-
-    if (Object.keys(stats.ines.porTipo).length > 0) {
-      doc.fontSize(11).font('Helvetica-Bold').text('Desglose por tipo:', { indent: 20 });
+    // Desglose por tipo de trabajador
+    if (Object.keys(stats.registros.porTipo).length > 0) {
+      doc.fontSize(14).font('Helvetica-Bold').text('Desglose por tipo de trabajador:', { indent: 20 });
+      doc.moveDown(0.5);
       doc.fontSize(11).font('Helvetica');
-      Object.entries(stats.ines.porTipo)
+      Object.entries(stats.registros.porTipo)
         .sort((a, b) => b[1] - a[1]) // Ordenar de mayor a menor
         .forEach(([tipo, count]) => {
-          doc.text(`• ${tipo}: ${count}`, { indent: 40 });
+          doc.text(`• ${tipo}: ${count} registro${count > 1 ? 's' : ''}`, { indent: 40 });
         });
+      doc.moveDown(1);
     } else {
-      doc.fontSize(11).font('Helvetica-Oblique').text('No hay registros de INE en este periodo', { indent: 40 });
+      doc.fontSize(11).font('Helvetica-Oblique').text('No hay registros en este periodo', { indent: 40 });
+      doc.moveDown(1);
     }
-    doc.moveDown(1.5);
 
-    // Sección Trabajadores
-    if (stats.trabajadores.total > 0) {
-      doc.fontSize(16).font('Helvetica-Bold').text('ENTREGAS/REPARTIDORES', { underline: true });
+    // Desglose por casa
+    if (Object.keys(stats.registros.porCasa).length > 0) {
+      doc.fontSize(14).font('Helvetica-Bold').text('Desglose por casa:', { indent: 20 });
       doc.moveDown(0.5);
-      doc.fontSize(12).font('Helvetica');
-      doc.text(`Total: ${stats.trabajadores.total}`, { indent: 20 });
-      doc.moveDown(0.5);
-
-      if (Object.keys(stats.trabajadores.porTipo).length > 0) {
-        doc.fontSize(11).font('Helvetica-Bold').text('Desglose por tipo:', { indent: 20 });
-        doc.fontSize(11).font('Helvetica');
-        Object.entries(stats.trabajadores.porTipo)
-          .sort((a, b) => b[1] - a[1])
-          .forEach(([tipo, count]) => {
-            doc.text(`• ${tipo}: ${count}`, { indent: 40 });
-          });
-      }
+      doc.fontSize(11).font('Helvetica');
+      Object.entries(stats.registros.porCasa)
+        .sort((a, b) => {
+          // Ordenar numéricamente por número de casa
+          const numA = parseInt(a[0]) || 0;
+          const numB = parseInt(b[0]) || 0;
+          return numA - numB;
+        })
+        .forEach(([casa, count]) => {
+          doc.text(`• Casa ${casa}: ${count} registro${count > 1 ? 's' : ''}`, { indent: 40 });
+        });
       doc.moveDown(1.5);
     }
 
