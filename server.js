@@ -6,6 +6,8 @@ import { google } from 'googleapis';
 import { readFileSync } from 'fs';
 import { Readable } from 'stream';
 import PDFDocument from 'pdfkit';
+import cron from 'node-cron';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -1386,8 +1388,14 @@ app.post('/api/register-worker', async (req, res) => {
       getOrCreateINEFolderStructure(condominio, houseNumber, currentDate)
         .then(folderResult => {
           if (folderResult) {
-            // Nombre del archivo: Nombre_Tipo_Dia_timestamp.jpg
-            const fileName = `${workerName}_${workerTypeNormalized}_Dia${folderResult.day}_${timestamp}.jpg`;
+            // Obtener hora en formato 24hrs (México timezone)
+            const mexicoDate = new Date(currentDate.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+            const hours = String(mexicoDate.getHours()).padStart(2, '0');
+            const minutes = String(mexicoDate.getMinutes()).padStart(2, '0');
+            const timeStr = `${hours}h${minutes}`; // Formato: 19h30 (7:30 PM)
+
+            // Nombre del archivo: Nombre_Tipo_Dia09_19h30_timestamp.jpg
+            const fileName = `${workerName}_${workerTypeNormalized}_Dia${folderResult.day}_${timeStr}_${timestamp}.jpg`;
             return uploadPhotoToDrive(photoBase64, fileName, folderResult.folderId);
           }
           return null;
@@ -1552,10 +1560,16 @@ app.post('/api/register-ine', async (req, res) => {
     const currentDate = new Date();
     const folderResult = await getOrCreateINEFolderStructure(condominio, houseNumber, currentDate);
 
+    // Obtener hora en formato 24hrs (México timezone)
+    const mexicoDate = new Date(currentDate.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+    const hours = String(mexicoDate.getHours()).padStart(2, '0');
+    const minutes = String(mexicoDate.getMinutes()).padStart(2, '0');
+    const timeStr = `${hours}h${minutes}`; // Formato: 19h30 (7:30 PM)
+
     if (photoFrontal && photoFrontal.trim() !== '' && folderResult) {
-      // Nombre del archivo: Nombre_Apellido_Tipo_Dia_Frontal_timestamp.jpg
+      // Nombre del archivo: Nombre_Apellido_Tipo_Dia09_19h30_Frontal_timestamp.jpg
       const nombreCompleto = `${nombre}_${apellido || ''}`.replace(/\s+/g, '_');
-      const fileNameFrontal = `${nombreCompleto}_${tipoNormalizado}_Dia${folderResult.day}_Frontal_${timestamp}.jpg`;
+      const fileNameFrontal = `${nombreCompleto}_${tipoNormalizado}_Dia${folderResult.day}_${timeStr}_Frontal_${timestamp}.jpg`;
       uploadPromises.push(
         uploadPhotoToDrive(photoFrontal, fileNameFrontal, folderResult.folderId)
           .then(result => ({ type: 'frontal', result }))
@@ -1564,9 +1578,9 @@ app.post('/api/register-ine', async (req, res) => {
     }
 
     if (photoTrasera && photoTrasera.trim() !== '' && folderResult) {
-      // Nombre del archivo: Nombre_Apellido_Tipo_Dia_Trasera_timestamp.jpg
+      // Nombre del archivo: Nombre_Apellido_Tipo_Dia09_19h30_Trasera_timestamp.jpg
       const nombreCompleto = `${nombre}_${apellido || ''}`.replace(/\s+/g, '_');
-      const fileNameTrasera = `${nombreCompleto}_${tipoNormalizado}_Dia${folderResult.day}_Trasera_${timestamp}.jpg`;
+      const fileNameTrasera = `${nombreCompleto}_${tipoNormalizado}_Dia${folderResult.day}_${timeStr}_Trasera_${timestamp}.jpg`;
       uploadPromises.push(
         uploadPhotoToDrive(photoTrasera, fileNameTrasera, folderResult.folderId)
           .then(result => ({ type: 'trasera', result }))
@@ -2007,6 +2021,262 @@ async function startServer() {
   }
 }
 
+// ============================================
+// SISTEMA DE REPORTES AUTOMÁTICOS FIN DE MES
+// ============================================
+
+// Configurar transporter de nodemailer (Gmail)
+let emailTransporter = null;
+
+function setupEmailTransporter() {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+    console.log('⚠️ Email no configurado (falta EMAIL_USER o EMAIL_PASSWORD)');
+    return null;
+  }
+
+  try {
+    emailTransporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD // App Password de Gmail
+      }
+    });
+    console.log('✅ Email transporter configurado');
+    return emailTransporter;
+  } catch (error) {
+    console.error('❌ Error configurando email:', error.message);
+    return null;
+  }
+}
+
+// Función para generar y enviar reporte mensual automáticamente
+async function generateAndSendMonthlyReport() {
+  try {
+    console.log('\n📊 ===== GENERANDO REPORTE MENSUAL AUTOMÁTICO =====');
+
+    // Obtener mes y año anterior
+    const now = new Date();
+    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const month = lastMonth.getMonth() + 1;
+    const year = lastMonth.getFullYear();
+
+    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    const monthName = monthNames[month - 1];
+
+    console.log(`📅 Generando reporte de ${monthName} ${year}`);
+
+    // Obtener lista de condominios desde Drive
+    if (!driveService) {
+      console.error('❌ Drive no está inicializado');
+      return;
+    }
+
+    const condominiosFiles = await listFilesInFolder(DRIVE_FOLDER_ID);
+    const condominioFolders = condominiosFiles.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+    if (condominioFolders.length === 0) {
+      console.log('⚠️ No hay condominios para generar reportes');
+      return;
+    }
+
+    console.log(`📁 Encontrados ${condominioFolders.length} condominios`);
+
+    // Generar y enviar reporte para cada condominio
+    for (const condominioFolder of condominioFolders) {
+      const condominioName = condominioFolder.name;
+
+      try {
+        console.log(`\n  📊 Generando reporte para: ${condominioName}`);
+
+        // Generar reporte desde Drive
+        const driveReport = await generateMonthlyReportFromDrive(month, year, condominioName);
+
+        if (driveReport.total === 0) {
+          console.log(`  ⚠️ No hay datos para ${condominioName} en ${monthName}`);
+          continue;
+        }
+
+        console.log(`  ✅ Datos encontrados: ${driveReport.total} registros`);
+
+        // Generar PDF
+        const pdfBuffer = await generatePDFBuffer(month, year, condominioName, driveReport);
+
+        // Enviar por email si está configurado
+        if (emailTransporter && process.env.EMAIL_RECIPIENTS) {
+          await sendReportEmail(condominioName, monthName, year, pdfBuffer);
+        }
+
+        console.log(`  ✅ Reporte completado para ${condominioName}`);
+
+      } catch (error) {
+        console.error(`  ❌ Error con ${condominioName}:`, error.message);
+      }
+    }
+
+    console.log('\n✅ ===== REPORTES MENSUALES COMPLETADOS =====\n');
+
+  } catch (error) {
+    console.error('❌ Error en generación automática de reportes:', error);
+  }
+}
+
+// Función auxiliar para generar PDF como Buffer
+async function generatePDFBuffer(month, year, condominio, driveReport) {
+  return new Promise((resolve, reject) => {
+    const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+    const doc = new PDFDocument({ margin: 50, size: 'LETTER' });
+    const chunks = [];
+
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    // Header
+    doc.fontSize(20).font('Helvetica-Bold').text('REPORTE MENSUAL DE ACTIVIDAD', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(14).font('Helvetica').text(`${monthNames[month - 1]} ${year}`, { align: 'center' });
+    doc.fontSize(12).text(`Condominio: ${condominio}`, { align: 'center' });
+    doc.moveDown(1);
+
+    doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+    doc.moveDown(1);
+
+    // Sección Registros
+    doc.fontSize(16).font('Helvetica-Bold').text('TRABAJADORES/SERVICIOS REGISTRADOS', { underline: true });
+    doc.moveDown(0.5);
+    doc.fontSize(12).font('Helvetica');
+    doc.text(`Total de registros del mes: ${driveReport.total}`, { indent: 20 });
+    doc.moveDown(1);
+
+    // Desglose por tipo
+    if (Object.keys(driveReport.porTipo).length > 0) {
+      doc.fontSize(14).font('Helvetica-Bold').text('Desglose por tipo de trabajador:', { indent: 20 });
+      doc.moveDown(0.5);
+      doc.fontSize(11).font('Helvetica');
+      Object.entries(driveReport.porTipo)
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([tipo, count]) => {
+          doc.text(`• ${tipo}: ${count} registro${count > 1 ? 's' : ''}`, { indent: 40 });
+        });
+      doc.moveDown(1);
+    }
+
+    // Desglose por casa
+    if (Object.keys(driveReport.porCasa).length > 0) {
+      doc.fontSize(14).font('Helvetica-Bold').text('Desglose por casa:', { indent: 20 });
+      doc.moveDown(0.5);
+      doc.fontSize(11).font('Helvetica');
+      Object.entries(driveReport.porCasa)
+        .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+        .forEach(([casa, count]) => {
+          doc.text(`• Casa ${casa}: ${count} registro${count > 1 ? 's' : ''}`, { indent: 40 });
+        });
+      doc.moveDown(1.5);
+    }
+
+    // Footer
+    doc.moveDown(2);
+    doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+    doc.moveDown(0.5);
+    doc.fontSize(9).font('Helvetica-Oblique').text(
+      'Todas las credenciales INE están resguardadas digitalmente en Google Drive.',
+      { align: 'center' }
+    );
+    doc.moveDown(0.5);
+    doc.fontSize(10).font('Helvetica').text(
+      `Generado automáticamente el ${new Date().toLocaleDateString('es-MX')}`,
+      { align: 'center' }
+    );
+
+    doc.end();
+  });
+}
+
+// Función para enviar email con el reporte
+async function sendReportEmail(condominio, monthName, year, pdfBuffer) {
+  if (!emailTransporter) return;
+
+  const recipients = process.env.EMAIL_RECIPIENTS.split(',').map(e => e.trim());
+
+  const mailOptions = {
+    from: `"QR Manager" <${process.env.EMAIL_USER}>`,
+    to: recipients,
+    subject: `Reporte Mensual - ${condominio} - ${monthName} ${year}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">Reporte Mensual de Actividad</h2>
+        <p>Estimado administrador,</p>
+        <p>Adjunto encontrarás el reporte mensual de actividad para:</p>
+        <ul>
+          <li><strong>Condominio:</strong> ${condominio}</li>
+          <li><strong>Período:</strong> ${monthName} ${year}</li>
+        </ul>
+        <p>Este reporte incluye:</p>
+        <ul>
+          <li>Total de trabajadores/servicios registrados</li>
+          <li>Desglose por tipo de trabajador</li>
+          <li>Desglose por casa</li>
+        </ul>
+        <p style="color: #666; font-size: 12px; margin-top: 30px;">
+          Este es un email automático generado por el sistema QR Manager.
+        </p>
+      </div>
+    `,
+    attachments: [
+      {
+        filename: `Resumen_${condominio}_${monthName}_${year}.pdf`,
+        content: pdfBuffer,
+        contentType: 'application/pdf'
+      }
+    ]
+  };
+
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    console.log(`  ✅ Email enviado a: ${recipients.join(', ')}`);
+  } catch (error) {
+    console.error(`  ❌ Error enviando email:`, error.message);
+  }
+}
+
+// Programar tarea automática: Cada día 1 a las 2:00 AM (hora de México)
+// Cron: '0 2 1 * *' = minuto 0, hora 2, día 1, cualquier mes, cualquier día de semana
+cron.schedule('0 2 1 * *', () => {
+  console.log('\n⏰ Tarea programada activada: Generación de reportes mensuales');
+  generateAndSendMonthlyReport();
+}, {
+  scheduled: true,
+  timezone: "America/Mexico_City"
+});
+
+console.log('📅 Cron job configurado: Reportes automáticos cada día 1 a las 2:00 AM (México)');
+
+// Endpoint manual para probar/forzar generación de reportes
+app.post('/api/generate-monthly-reports', async (req, res) => {
+  try {
+    console.log('📊 Generación manual de reportes solicitada');
+
+    // Ejecutar en background
+    generateAndSendMonthlyReport().catch(err => {
+      console.error('Error en generación manual:', err);
+    });
+
+    res.json({
+      success: true,
+      message: 'Generación de reportes iniciada. Los reportes se enviarán por email cuando estén listos.'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Manejo de cierre graceful
 process.on('SIGTERM', async () => {
   console.log('⚠️ SIGTERM recibido, cerrando servidor...');
@@ -2023,6 +2293,9 @@ process.on('SIGINT', async () => {
   }
   process.exit(0);
 });
+
+// Configurar email al iniciar
+setupEmailTransporter();
 
 // Iniciar
 startServer();

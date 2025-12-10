@@ -17,7 +17,9 @@
     "mongodb": "^6.3.0",
     "dotenv": "^16.3.1",
     "googleapis": "^128.0.0",
-    "pdfkit": "^0.15.0"
+    "pdfkit": "^0.15.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.8"
   },
   "author": "Papayo15",
   "license": "MIT"
