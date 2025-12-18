@@ -57,13 +57,16 @@ function normalizeCondominioName(name) {
     .replace(/^_|_$/g, ''); // Eliminar _ al inicio/final
 }
 
+// Variable global para oauth2Client
+let oauth2Client = null;
+
 async function initializeGoogleServices() {
   try {
     // Verificar si tenemos credenciales OAuth (RECOMENDADO para subir archivos)
     if (process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET && process.env.OAUTH_REFRESH_TOKEN) {
       console.log('🔐 Usando OAuth para Google Drive y Sheets');
 
-      const oauth2Client = new google.auth.OAuth2(
+      oauth2Client = new google.auth.OAuth2(
         process.env.OAUTH_CLIENT_ID,
         process.env.OAUTH_CLIENT_SECRET,
         'http://localhost:3000/oauth2callback' // Redirect URI (no se usa en servidor, pero es requerido)
@@ -74,12 +77,23 @@ async function initializeGoogleServices() {
         refresh_token: process.env.OAUTH_REFRESH_TOKEN
       });
 
+      // Manejar renovación automática de tokens
+      oauth2Client.on('tokens', (tokens) => {
+        if (tokens.refresh_token) {
+          console.log('🔄 Nuevo refresh token recibido (esto es raro, guárdalo)');
+          console.log('Nuevo refresh token:', tokens.refresh_token);
+        }
+        if (tokens.access_token) {
+          console.log('✅ Access token renovado automáticamente');
+        }
+      });
+
       // Inicializar servicios con OAuth
       driveService = google.drive({ version: 'v3', auth: oauth2Client });
       sheetsService = google.sheets({ version: 'v4', auth: oauth2Client });
 
-      console.log('✅ Google Drive inicializado con OAuth');
-      console.log('✅ Google Sheets inicializado con OAuth');
+      console.log('✅ Google Drive inicializado con OAuth (auto-renovación habilitada)');
+      console.log('✅ Google Sheets inicializado con OAuth (auto-renovación habilitada)');
 
       return { driveService, sheetsService };
     }
@@ -177,6 +191,10 @@ async function getOrCreateSubfolder(parentFolderId, folderName, cacheKey = null)
     return folderId;
   } catch (error) {
     console.error(`❌ Error con carpeta ${folderName}:`, error.message);
+
+    // Detectar si es un error de OAuth y notificar
+    await handleOAuthError(error, `Crear/obtener carpeta: ${folderName}`);
+
     return null;
   }
 }
@@ -267,6 +285,10 @@ async function listFilesInFolder(folderId) {
     return response.data.files || [];
   } catch (error) {
     console.error(`Error listando archivos en carpeta ${folderId}:`, error.message);
+
+    // Detectar si es un error de OAuth y notificar
+    await handleOAuthError(error, 'Listar archivos en Drive');
+
     return [];
   }
 }
@@ -447,6 +469,10 @@ async function uploadPhotoToDrive(photoBase64, fileName, targetFolderId, mimeTyp
     };
   } catch (error) {
     console.error('❌ Error subiendo foto a Drive:', error.message);
+
+    // Detectar si es un error de OAuth y notificar
+    await handleOAuthError(error, 'Subir foto a Drive');
+
     return null;
   }
 }
@@ -2059,6 +2085,90 @@ function setupEmailTransporter() {
     console.error('❌ Error configurando email:', error.message);
     return null;
   }
+}
+
+// Función para enviar alerta de OAuth expirado
+async function sendOAuthExpirationAlert(errorDetails) {
+  try {
+    if (!emailTransporter) {
+      emailTransporter = setupEmailTransporter();
+    }
+
+    if (!emailTransporter) {
+      console.warn('⚠️ No se pudo enviar alerta: email no configurado');
+      return;
+    }
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: process.env.EMAIL_USER, // Enviar a ti mismo
+      subject: '🚨 URGENTE: OAuth Token Expirado - QR Manager',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #fff3cd; border: 2px solid #ffc107; border-radius: 10px;">
+          <h1 style="color: #856404;">🚨 OAuth Token Expirado</h1>
+          <p style="font-size: 16px;">El token de Google Drive/Sheets ha expirado y debe ser regenerado.</p>
+
+          <h2 style="color: #856404;">Detalles del Error:</h2>
+          <pre style="background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto;">${errorDetails}</pre>
+
+          <h2 style="color: #856404;">Solución Rápida:</h2>
+          <ol style="font-size: 14px; line-height: 1.8;">
+            <li>Abre tu terminal local</li>
+            <li>Ve a: <code>cd /Users/papayo/Desktop/QR_Backend</code></li>
+            <li>Ejecuta: <code>node get-new-oauth-token.js</code></li>
+            <li>Autoriza en el navegador</li>
+            <li>Copia el nuevo OAUTH_REFRESH_TOKEN</li>
+            <li>Ve a Render Dashboard: <a href="https://dashboard.render.com/web/srv-cuinbubv2p9s73fnpdv0">https://dashboard.render.com/web/srv-cuinbubv2p9s73fnpdv0</a></li>
+            <li>Actualiza la variable OAUTH_REFRESH_TOKEN</li>
+            <li>Guarda cambios (Render hará redeploy automático)</li>
+          </ol>
+
+          <p style="font-size: 14px; color: #856404; margin-top: 20px;">
+            <strong>Nota:</strong> Mientras tanto, el sistema seguirá funcionando pero <strong>las fotos NO se subirán a Drive</strong>.
+          </p>
+
+          <hr style="margin: 20px 0;">
+          <p style="font-size: 12px; color: #666;">
+            Fecha/Hora: ${new Date().toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })}<br>
+            Servidor: ${SERVER_URL}
+          </p>
+        </div>
+      `
+    };
+
+    await emailTransporter.sendMail(mailOptions);
+    console.log('📧 Alerta de OAuth expirado enviada por email');
+
+  } catch (error) {
+    console.error('❌ Error enviando alerta de OAuth:', error.message);
+  }
+}
+
+// Función para detectar y manejar errores de OAuth
+async function handleOAuthError(error, context = 'Operación desconocida') {
+  const errorMessage = error?.message || error?.toString() || 'Error desconocido';
+
+  if (errorMessage.includes('invalid_grant') ||
+      errorMessage.includes('Token has been expired') ||
+      errorMessage.includes('invalid_token')) {
+
+    console.error(`\n🚨 ===== ERROR DE OAUTH DETECTADO =====`);
+    console.error(`Contexto: ${context}`);
+    console.error(`Error: ${errorMessage}`);
+    console.error(`Fecha: ${new Date().toISOString()}`);
+    console.error(`=====================================\n`);
+
+    // Enviar alerta por email (solo una vez cada 6 horas)
+    const now = Date.now();
+    if (!global.lastOAuthAlert || (now - global.lastOAuthAlert) > 6 * 60 * 60 * 1000) {
+      global.lastOAuthAlert = now;
+      await sendOAuthExpirationAlert(`Contexto: ${context}\n\nError: ${errorMessage}\n\nStack: ${error.stack || 'N/A'}`);
+    }
+
+    return true; // Es un error de OAuth
+  }
+
+  return false; // No es un error de OAuth
 }
 
 // Función para generar y enviar reporte mensual automáticamente
