@@ -97,9 +97,9 @@ async function initializeGoogleServices() {
 
       return { driveService, sheetsService };
     }
-    // Fallback a Service Account (solo para Sheets, NO para subir archivos)
+    // Service Account — sin expiración, recomendado para producción
     else {
-      console.log('⚠️ OAuth no configurado, usando Service Account (limitado)');
+      console.log('🔐 Usando Service Account para Google Drive y Sheets (sin expiración)');
       let credentials;
 
       // Intentar leer desde archivo primero (desarrollo local)
@@ -119,14 +119,14 @@ async function initializeGoogleServices() {
       const auth = new google.auth.GoogleAuth({
         credentials: credentials,
         scopes: [
-          'https://www.googleapis.com/auth/drive.file',
+          'https://www.googleapis.com/auth/drive',
           'https://www.googleapis.com/auth/spreadsheets'
         ],
       });
 
       // Inicializar Drive
       driveService = google.drive({ version: 'v3', auth });
-      console.log('⚠️ Google Drive inicializado con Service Account (NO puede subir archivos)');
+      console.log('✅ Google Drive inicializado con Service Account (sin expiración)');
 
       // Inicializar Sheets
       sheetsService = google.sheets({ version: 'v4', auth });
