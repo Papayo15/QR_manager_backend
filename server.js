@@ -14,6 +14,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const PING_URL = process.env.RENDER_EXTERNAL_URL || SERVER_URL;
 const MONGODB_URI = process.env.MONGODB_URI;
 
 // Middleware
@@ -2004,11 +2005,12 @@ app.post('/api/admin/reset-all', async (req, res) => {
 function startKeepAlive() {
   const PING_INTERVAL = 10 * 60 * 1000; // 10 minutos
 
-  console.log(`🔄 Keep-alive iniciado - Ping cada 10 minutos a ${SERVER_URL}`);
+  console.log(`🔄 Keep-alive iniciado - Ping cada 10 minutos a ${PING_URL}`);
 
   setInterval(async () => {
     try {
-      const response = await fetch(`${SERVER_URL}/api/keep-alive`);
+      const response = await fetch(`${PING_URL}/api/keep-alive`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       console.log(`🏓 Self-ping OK - Uptime: ${data.uptime}s - Memoria: ${data.memory}MB`);
     } catch (error) {
