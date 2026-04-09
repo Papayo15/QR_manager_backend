@@ -2226,6 +2226,27 @@ async function generateAndSendMonthlyReport() {
         // Generar PDF
         const pdfBuffer = await generatePDFBuffer(month, year, condominioName, driveReport);
 
+        // Guardar PDF en Drive → Condominio/Año/Mes/Reporte_Mensual_Mes_Año.pdf
+        try {
+          const condominioNorm = condominioName.replace(/\s+/g, '_');
+          const condFolderId = await getOrCreateSubfolder(DRIVE_FOLDER_ID, condominioName);
+          const yearFolderId = await getOrCreateSubfolder(condFolderId, String(year));
+          const monthFolderId = await getOrCreateSubfolder(yearFolderId, monthName);
+
+          const pdfStream = Readable.from(pdfBuffer);
+          const pdfFileName = `Reporte_${monthName}_${year}_${condominioNorm}.pdf`;
+
+          await driveService.files.create({
+            requestBody: { name: pdfFileName, parents: [monthFolderId] },
+            media: { mimeType: 'application/pdf', body: pdfStream },
+            fields: 'id'
+          });
+
+          console.log(`  📁 PDF guardado en Drive: ${condominioName}/${year}/${monthName}/${pdfFileName}`);
+        } catch (driveErr) {
+          console.error(`  ⚠️ No se pudo guardar PDF en Drive: ${driveErr.message}`);
+        }
+
         // Enviar por email si está configurado
         if (emailTransporter && process.env.EMAIL_RECIPIENTS) {
           await sendReportEmail(condominioName, monthName, year, pdfBuffer);
