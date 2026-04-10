@@ -446,14 +446,18 @@ async function uploadPhotoToDrive(photoBase64, fileName, targetFolderId, mimeTyp
       fields: 'id, webViewLink, webContentLink'
     });
 
-    // Hacer el archivo público para que se pueda visualizar
-    await driveService.permissions.create({
-      fileId: file.data.id,
-      requestBody: {
-        role: 'reader',
-        type: 'anyone'
-      }
-    });
+    // Hacer el archivo público — no fatal: si falla, la foto igual queda guardada
+    try {
+      await driveService.permissions.create({
+        fileId: file.data.id,
+        requestBody: {
+          role: 'reader',
+          type: 'anyone'
+        }
+      });
+    } catch (permError) {
+      console.warn(`⚠️ No se pudo hacer pública la foto (continuando de todas formas): ${permError.message}`);
+    }
 
     // Obtener URL directa de visualización
     const directUrl = `https://drive.google.com/uc?export=view&id=${file.data.id}`;
@@ -469,10 +473,6 @@ async function uploadPhotoToDrive(photoBase64, fileName, targetFolderId, mimeTyp
     };
   } catch (error) {
     console.error('❌ Error subiendo foto a Drive:', error.message);
-
-    // Detectar si es un error de OAuth y notificar
-    await handleOAuthError(error, 'Subir foto a Drive');
-
     return null;
   }
 }
