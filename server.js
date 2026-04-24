@@ -1959,65 +1959,130 @@ app.get('/api/monthly-report-pdf', async (req, res) => {
 
 app.get('/api/reporte-ines-pdf', async (req, res) => {
   try {
-    if (!db) return res.status(503).json({ success: false, error: 'Base de datos no disponible' });
+    if (!driveService) return res.status(503).json({ success: false, error: 'Drive no disponible' });
 
     const { condominio } = req.query;
-    const filtro = { status: 'activo' };
-    if (condominio) filtro.condominio = condominio;
-
-    const ines = await db.collection('ines').find(filtro).sort({ condominio: 1, houseNumber: 1, createdAt: 1 }).toArray();
-
+    const registros = [];
     const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-    const formatDate = (iso) => {
-      const d = new Date(iso);
-      return `${String(d.getDate()).padStart(2,'0')}/${monthNames[d.getMonth()]}/${d.getFullYear()}`;
-    };
 
+    // Escanear Drive: Condominio > Año > Mes > Día > Casa > archivos
+    const condominios = (await listFilesInFolder(DRIVE_FOLDER_ID))
+      .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+    for (const condFolder of condominios) {
+      if (condominio && condFolder.name.toLowerCase() !== condominio.toLowerCase()) continue;
+
+      const years = (await listFilesInFolder(condFolder.id))
+        .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+      for (const yearFolder of years) {
+        const months = (await listFilesInFolder(yearFolder.id))
+          .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+        for (const monthFolder of months) {
+          const monthNum = monthNames.indexOf(monthFolder.name) + 1;
+          const days = (await listFilesInFolder(monthFolder.id))
+            .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+          for (const dayFolder of days) {
+            const casas = (await listFilesInFolder(dayFolder.id))
+              .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+
+            for (const casaFolder of casas) {
+              const casaNum = casaFolder.name.replace('Casa_', '');
+              const files = (await listFilesInFolder(casaFolder.id))
+                .filter(f => f.mimeType && f.mimeType.startsWith('image/'));
+
+              for (const file of files) {
+                // Evitar duplicados (foto trasera)
+                if (file.name.toLowerCase().includes('trasera')) continue;
+
+                // Extraer nombre y tipo del nombre del archivo
+                // Formato: Nombre_Apellido_Tipo_10h06_timestamp.jpg
+                const parts = file.name.replace(/\.[^.]+$/, '').split('_');
+                let nombre = parts[0] || 'Desconocido';
+                let tipo = '';
+                for (let i = 1; i < parts.length; i++) {
+                  if (/^\d{2}h\d{2}$/.test(parts[i])) {
+                    tipo = parts[i - 1] || '';
+                    nombre = parts.slice(0, i - 1).join(' ') || parts[0];
+                    break;
+                  }
+                }
+
+                registros.push({
+                  nombre,
+                  tipo,
+                  casa: casaNum,
+                  condominio: condFolder.name,
+                  dia: dayFolder.name,
+                  mes: monthNum,
+                  year: yearFolder.name,
+                  fecha: `${dayFolder.name}/${monthFolder.name}/${yearFolder.name}`
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Ordenar por condominio, año, mes, día, casa
+    registros.sort((a, b) =>
+      a.condominio.localeCompare(b.condominio) ||
+      a.year.localeCompare(b.year) ||
+      a.mes - b.mes ||
+      Number(a.dia) - Number(b.dia) ||
+      Number(a.casa) - Number(b.casa)
+    );
+
+    console.log(`📋 Reporte INEs desde Drive: ${registros.length} registros`);
+
+    // Generar PDF
     const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
 
-    const title = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
-    const now = formatDate(new Date().toISOString());
+    const titulo = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
+    const hoy = new Date();
+    const hoyStr = `${String(hoy.getDate()).padStart(2,'0')}/${monthNames[hoy.getMonth()]}/${hoy.getFullYear()}`;
 
     doc.fontSize(16).font('Helvetica-Bold').text('REPORTE DE INEs REGISTRADOS', { align: 'center' });
-    doc.fontSize(11).font('Helvetica').text(title, { align: 'center' });
-    doc.fontSize(9).text(`Generado: ${now}  |  Total: ${ines.length} registros`, { align: 'center' });
+    doc.fontSize(11).font('Helvetica').text(titulo, { align: 'center' });
+    doc.fontSize(9).text(`Generado: ${hoyStr}  |  Total: ${registros.length} registros`, { align: 'center' });
     doc.moveDown(0.8);
 
-    // Encabezado tabla
-    const col = { num: 40, nombre: 65, casa: 320, condo: 370, fecha: 460 };
-    doc.font('Helvetica-Bold').fontSize(9);
-    doc.text('#', col.num, doc.y, { continued: false });
-    const headerY = doc.y - doc.currentLineHeight();
+    const col = { num: 40, nombre: 65, tipo: 250, casa: 355, condo: 395, fecha: 480 };
+    const headerY = doc.y;
+    doc.font('Helvetica-Bold').fontSize(8);
     doc.text('#',       col.num,    headerY);
     doc.text('Nombre',  col.nombre, headerY);
+    doc.text('Tipo',    col.tipo,   headerY);
     doc.text('Casa',    col.casa,   headerY);
     doc.text('Cond.',   col.condo,  headerY);
     doc.text('Fecha',   col.fecha,  headerY);
-    doc.moveDown(0.3);
+    doc.moveDown(0.4);
     doc.moveTo(40, doc.y).lineTo(570, doc.y).stroke();
     doc.moveDown(0.3);
 
     doc.font('Helvetica').fontSize(8);
-    ines.forEach((ine, i) => {
-      if (doc.y > 720) { doc.addPage(); }
+    registros.forEach((r, i) => {
+      if (doc.y > 720) doc.addPage();
       const y = doc.y;
-      const nombre = `${ine.nombre || ''}${ine.apellido ? ' ' + ine.apellido : ''}`.trim() || 'Sin nombre';
-      doc.text(String(i + 1),        col.num,    y);
-      doc.text(nombre,               col.nombre, y, { width: 245 });
-      doc.text(String(ine.houseNumber || '-'), col.casa, y);
-      doc.text(ine.condominio || '-', col.condo, y, { width: 80 });
-      doc.text(ine.createdAt ? formatDate(ine.createdAt) : '-', col.fecha, y);
+      doc.text(String(i + 1),  col.num,    y);
+      doc.text(r.nombre,       col.nombre, y, { width: 180 });
+      doc.text(r.tipo,         col.tipo,   y, { width: 100 });
+      doc.text(r.casa,         col.casa,   y);
+      doc.text(r.condominio,   col.condo,  y, { width: 80 });
+      doc.text(r.fecha,        col.fecha,  y);
       doc.moveDown(0.6);
     });
 
     doc.end();
-
     await new Promise(resolve => doc.on('end', resolve));
     const pdfBuffer = Buffer.concat(chunks);
 
-    const filename = `Reporte_INEs_${condominio || 'Todos'}_${new Date().toISOString().split('T')[0]}.pdf`;
+    const filename = `Reporte_INEs_${condominio || 'Todos'}_${hoy.toISOString().split('T')[0]}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(pdfBuffer);
@@ -2248,7 +2313,12 @@ async function handleOAuthError(error, context = 'Operación desconocida') {
   return false; // No es un error de OAuth
 }
 
-// Función para generar y enviar reporte mensual automáticamente
+// ============================================================
+// REPORTES MENSUALES AUTOMÁTICOS — ELIMINADOS
+// El reporte en tiempo real (/api/reporte-ines-pdf) los reemplaza
+// ============================================================
+
+// Función para generar y enviar reporte mensual automáticamente (DESACTIVADA)
 async function generateAndSendMonthlyReport() {
   try {
     console.log('\n📊 ===== GENERANDO REPORTE MENSUAL AUTOMÁTICO =====');
@@ -2462,17 +2532,7 @@ async function sendReportEmail(condominio, monthName, year, pdfBuffer) {
   }
 }
 
-// Programar tarea automática: Cada día 1 a las 2:00 AM (hora de México)
-// Cron: '0 2 1 * *' = minuto 0, hora 2, día 1, cualquier mes, cualquier día de semana
-cron.schedule('0 2 1 * *', () => {
-  console.log('\n⏰ Tarea programada activada: Generación de reportes mensuales');
-  generateAndSendMonthlyReport();
-}, {
-  scheduled: true,
-  timezone: "America/Mexico_City"
-});
-
-console.log('📅 Cron job configurado: Reportes automáticos cada día 1 a las 2:00 AM (México)');
+// Cron de reportes mensuales desactivado — reemplazado por /api/reporte-ines-pdf en tiempo real
 
 // Endpoint manual para probar/forzar generación de reportes
 app.post('/api/generate-monthly-reports', async (req, res) => {
