@@ -2092,7 +2092,7 @@ app.get('/api/reporte-ines-pdf', async (req, res) => {
       const hoy = new Date();
       const filename = `Reporte_INEs_${cacheKey}_${hoy.toISOString().split('T')[0]}.pdf`;
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
       return res.send(cached.buffer);
     }
 
@@ -2120,6 +2120,194 @@ app.get('/api/reporte-ines-pdf', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error en reporte INEs:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
+// ENDPOINT: Concentrado de personal por mes y tipo
+// ============================================
+
+const concentradoCache = new Map();
+
+async function generarConcentrado(condominio) {
+  const folderCache = new Map();
+
+  async function getFolderInfo(folderId) {
+    if (!folderId) return null;
+    if (folderCache.has(folderId)) return folderCache.get(folderId);
+    try {
+      const f = await driveService.files.get({ fileId: folderId, fields: 'id,name,parents' });
+      const info = { name: f.data.name, parentId: f.data.parents?.[0] };
+      folderCache.set(folderId, info);
+      return info;
+    } catch { return null; }
+  }
+
+  // Obtener todas las imágenes
+  let pageToken = null;
+  const imageFiles = [];
+  do {
+    const resp = await driveService.files.list({
+      q: `mimeType contains 'image/' and trashed=false`,
+      fields: 'nextPageToken,files(id,name,parents)',
+      pageSize: 1000,
+      ...(pageToken && { pageToken })
+    });
+    imageFiles.push(...(resp.data.files || []));
+    pageToken = resp.data.nextPageToken;
+  } while (pageToken);
+
+  // Agrupar por mes y tipo: { 'Abr 2026': { 'Albañiles': 50, ... } }
+  const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  const datos = {}; // { 'YYYY-MM': { label, tipos: { tipo: count } } }
+  const tiposSet = new Set();
+
+  for (const file of imageFiles) {
+    if (file.name.toLowerCase().includes('trasera')) continue;
+    const casaFolder  = await getFolderInfo(file.parents?.[0]);
+    if (!casaFolder?.name?.startsWith('Casa_')) continue;
+    const dayFolder   = await getFolderInfo(casaFolder.parentId);
+    const monthFolder = await getFolderInfo(dayFolder?.parentId);
+    const yearFolder  = await getFolderInfo(monthFolder?.parentId);
+    const condFolder  = await getFolderInfo(yearFolder?.parentId);
+    if (!condFolder) continue;
+    if (condominio && condFolder.name.toLowerCase() !== condominio.toLowerCase()) continue;
+
+    const monthIdx = monthNames.indexOf(monthFolder?.name);
+    if (monthIdx === -1) continue;
+    const key = `${yearFolder?.name}-${String(monthIdx + 1).padStart(2,'0')}`;
+    const label = `${monthFolder?.name} ${yearFolder?.name}`;
+
+    if (!datos[key]) datos[key] = { label, tipos: {} };
+
+    // Extraer tipo del nombre del archivo
+    const parts = file.name.replace(/\.[^.]+$/, '').split('_');
+    let tipo = 'General';
+    for (let i = 1; i < parts.length; i++) {
+      if (/^\d{2}h\d{2}$/.test(parts[i])) { tipo = parts[i - 1] || 'General'; break; }
+    }
+    datos[key].tipos[tipo] = (datos[key].tipos[tipo] || 0) + 1;
+    tiposSet.add(tipo);
+  }
+
+  const meses = Object.keys(datos).sort();
+  const tipos = [...tiposSet].sort();
+  console.log(`📊 Concentrado: ${meses.length} meses, ${tipos.length} tipos`);
+
+  // Generar PDF
+  const doc = new PDFDocument({ margin: 40, size: 'LETTER', layout: 'landscape' });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+
+  const hoy = new Date();
+  const hoyStr = `${String(hoy.getDate()).padStart(2,'0')}/${monthNames[hoy.getMonth()]}/${hoy.getFullYear()}`;
+  const titulo = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
+
+  doc.fontSize(16).font('Helvetica-Bold').text('CONCENTRADO DE PERSONAL POR MES', { align: 'center' });
+  doc.fontSize(11).font('Helvetica').text(titulo, { align: 'center' });
+  doc.fontSize(9).text(`Generado: ${hoyStr}`, { align: 'center' });
+  doc.moveDown(0.8);
+
+  // Tabla: columna mes + una columna por tipo
+  const colWidth = Math.min(80, Math.floor((750 - 90) / Math.max(tipos.length, 1)));
+  const mesCol = 40;
+  const tiposCols = tipos.map((_, i) => mesCol + 90 + i * colWidth);
+  const totalCol = mesCol + 90 + tipos.length * colWidth;
+
+  // Encabezado
+  let hY = doc.y;
+  doc.font('Helvetica-Bold').fontSize(7);
+  doc.text('Mes', mesCol, hY, { width: 85 });
+  tipos.forEach((t, i) => doc.text(t, tiposCols[i], hY, { width: colWidth - 2 }));
+  doc.text('TOTAL', totalCol, hY, { width: 60 });
+  doc.moveDown(0.3);
+  doc.moveTo(mesCol, doc.y).lineTo(totalCol + 60, doc.y).stroke();
+  doc.moveDown(0.3);
+
+  doc.font('Helvetica').fontSize(7);
+  let grandTotal = 0;
+  const totalesPorTipo = {};
+
+  meses.forEach(key => {
+    if (doc.y > 510) doc.addPage();
+    const row = datos[key];
+    const y = doc.y;
+    const totalMes = Object.values(row.tipos).reduce((s, n) => s + n, 0);
+    grandTotal += totalMes;
+    doc.text(row.label, mesCol, y, { width: 85 });
+    tipos.forEach((t, i) => {
+      const n = row.tipos[t] || 0;
+      totalesPorTipo[t] = (totalesPorTipo[t] || 0) + n;
+      doc.text(n > 0 ? String(n) : '-', tiposCols[i], y, { width: colWidth - 2 });
+    });
+    doc.text(String(totalMes), totalCol, y, { width: 60 });
+    doc.moveDown(0.5);
+  });
+
+  // Fila totales
+  doc.moveTo(mesCol, doc.y).lineTo(totalCol + 60, doc.y).stroke();
+  doc.moveDown(0.2);
+  const tY = doc.y;
+  doc.font('Helvetica-Bold').fontSize(7);
+  doc.text('TOTAL', mesCol, tY, { width: 85 });
+  tipos.forEach((t, i) => doc.text(String(totalesPorTipo[t] || 0), tiposCols[i], tY, { width: colWidth - 2 }));
+  doc.text(String(grandTotal), totalCol, tY, { width: 60 });
+
+  doc.end();
+  await new Promise(resolve => doc.on('end', resolve));
+  return Buffer.concat(chunks);
+}
+
+// Regenerar concentrado cada 30 minutos
+setInterval(async () => {
+  if (!driveService) return;
+  try {
+    const buffer = await generarConcentrado(null);
+    concentradoCache.set('todos', { buffer, generatedAt: new Date() });
+    console.log('✅ Caché de concentrado actualizada');
+  } catch (e) {
+    console.error('⚠️ Error regenerando concentrado:', e.message);
+  }
+}, 30 * 60 * 1000);
+
+app.get('/api/concentrado-pdf', async (req, res) => {
+  try {
+    if (!driveService) return res.status(503).json({ success: false, error: 'Drive no disponible' });
+
+    const { condominio } = req.query;
+    const cacheKey = condominio || 'todos';
+    const cached = concentradoCache.get(cacheKey);
+
+    if (cached) {
+      const hoy = new Date();
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="Concentrado_${cacheKey}_${hoy.toISOString().split('T')[0]}.pdf"`);
+      return res.send(cached.buffer);
+    }
+
+    if (!concentradoCache.has('_generando_' + cacheKey)) {
+      concentradoCache.set('_generando_' + cacheKey, true);
+      generarConcentrado(condominio || null).then(buffer => {
+        concentradoCache.set(cacheKey, { buffer, generatedAt: new Date() });
+        concentradoCache.delete('_generando_' + cacheKey);
+        console.log(`✅ Concentrado "${cacheKey}" listo en caché`);
+      }).catch(e => {
+        concentradoCache.delete('_generando_' + cacheKey);
+        console.error('❌ Error generando concentrado:', e.message);
+      });
+    }
+
+    res.status(202).send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+        <h2>⏳ Generando concentrado...</h2>
+        <p>Se está generando por primera vez (1-2 minutos).</p>
+        <p>Esta página se recargará automáticamente.</p>
+        <script>setTimeout(() => location.reload(), 15000)</script>
+      </body></html>
+    `);
+  } catch (error) {
+    console.error('❌ Error concentrado:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
