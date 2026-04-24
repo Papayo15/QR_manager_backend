@@ -1963,79 +1963,73 @@ app.get('/api/reporte-ines-pdf', async (req, res) => {
 
     const { condominio } = req.query;
     const registros = [];
-    const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+    const folderCache = new Map();
 
-    // Escanear Drive: Condominio > Año > Mes > Día > Casa > archivos
-    const condominios = (await listFilesInFolder(DRIVE_FOLDER_ID))
-      .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
-
-    for (const condFolder of condominios) {
-      if (condominio && condFolder.name.toLowerCase() !== condominio.toLowerCase()) continue;
-
-      const years = (await listFilesInFolder(condFolder.id))
-        .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
-
-      for (const yearFolder of years) {
-        const months = (await listFilesInFolder(yearFolder.id))
-          .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
-
-        for (const monthFolder of months) {
-          const monthNum = monthNames.indexOf(monthFolder.name) + 1;
-          const days = (await listFilesInFolder(monthFolder.id))
-            .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
-
-          for (const dayFolder of days) {
-            const casas = (await listFilesInFolder(dayFolder.id))
-              .filter(f => f.mimeType === 'application/vnd.google-apps.folder');
-
-            for (const casaFolder of casas) {
-              const casaNum = casaFolder.name.replace('Casa_', '');
-              const files = (await listFilesInFolder(casaFolder.id))
-                .filter(f => f.mimeType && f.mimeType.startsWith('image/'));
-
-              for (const file of files) {
-                // Evitar duplicados (foto trasera)
-                if (file.name.toLowerCase().includes('trasera')) continue;
-
-                // Extraer nombre y tipo del nombre del archivo
-                // Formato: Nombre_Apellido_Tipo_10h06_timestamp.jpg
-                const parts = file.name.replace(/\.[^.]+$/, '').split('_');
-                let nombre = parts[0] || 'Desconocido';
-                let tipo = '';
-                for (let i = 1; i < parts.length; i++) {
-                  if (/^\d{2}h\d{2}$/.test(parts[i])) {
-                    tipo = parts[i - 1] || '';
-                    nombre = parts.slice(0, i - 1).join(' ') || parts[0];
-                    break;
-                  }
-                }
-
-                registros.push({
-                  nombre,
-                  tipo,
-                  casa: casaNum,
-                  condominio: condFolder.name,
-                  dia: dayFolder.name,
-                  mes: monthNum,
-                  year: yearFolder.name,
-                  fecha: `${dayFolder.name}/${monthFolder.name}/${yearFolder.name}`
-                });
-              }
-            }
-          }
-        }
-      }
+    // Obtener info de carpeta con caché (evita llamadas repetidas)
+    async function getFolderInfo(folderId) {
+      if (!folderId) return null;
+      if (folderCache.has(folderId)) return folderCache.get(folderId);
+      try {
+        const f = await driveService.files.get({ fileId: folderId, fields: 'id,name,parents' });
+        const info = { name: f.data.name, parentId: f.data.parents?.[0] };
+        folderCache.set(folderId, info);
+        return info;
+      } catch { return null; }
     }
 
-    // Ordenar por condominio, año, mes, día, casa
-    registros.sort((a, b) =>
-      a.condominio.localeCompare(b.condominio) ||
-      a.year.localeCompare(b.year) ||
-      a.mes - b.mes ||
-      Number(a.dia) - Number(b.dia) ||
-      Number(a.casa) - Number(b.casa)
-    );
+    // UNA sola búsqueda de todas las imágenes en Drive
+    let pageToken = null;
+    const imageFiles = [];
+    do {
+      const resp = await driveService.files.list({
+        q: `mimeType contains 'image/' and trashed=false`,
+        fields: 'nextPageToken,files(id,name,parents,createdTime)',
+        pageSize: 1000,
+        ...(pageToken && { pageToken })
+      });
+      imageFiles.push(...(resp.data.files || []));
+      pageToken = resp.data.nextPageToken;
+    } while (pageToken);
 
+    console.log(`🔍 Total imágenes encontradas en Drive: ${imageFiles.length}`);
+
+    // Resolver estructura de carpetas para cada archivo (con caché)
+    for (const file of imageFiles) {
+      if (file.name.toLowerCase().includes('trasera')) continue;
+
+      const casaFolder  = await getFolderInfo(file.parents?.[0]);
+      if (!casaFolder?.name?.startsWith('Casa_')) continue;
+
+      const dayFolder   = await getFolderInfo(casaFolder.parentId);
+      const monthFolder = await getFolderInfo(dayFolder?.parentId);
+      const yearFolder  = await getFolderInfo(monthFolder?.parentId);
+      const condFolder  = await getFolderInfo(yearFolder?.parentId);
+
+      if (!condFolder) continue;
+      if (condominio && condFolder.name.toLowerCase() !== condominio.toLowerCase()) continue;
+
+      // Extraer nombre y tipo del nombre del archivo
+      const parts = file.name.replace(/\.[^.]+$/, '').split('_');
+      let nombre = parts[0] || 'Desconocido';
+      let tipo = '';
+      for (let i = 1; i < parts.length; i++) {
+        if (/^\d{2}h\d{2}$/.test(parts[i])) {
+          tipo = parts[i - 1] || '';
+          nombre = parts.slice(0, i - 1).join(' ') || parts[0];
+          break;
+        }
+      }
+
+      registros.push({
+        nombre, tipo,
+        casa: casaFolder.name.replace('Casa_', ''),
+        condominio: condFolder.name,
+        fecha: `${dayFolder?.name || '?'}/${monthFolder?.name || '?'}/${yearFolder?.name || '?'}`,
+        sortKey: `${condFolder.name}_${yearFolder?.name}_${monthFolder?.name}_${(dayFolder?.name || '').padStart(2,'0')}_${casaFolder.name}`
+      });
+    }
+
+    registros.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
     console.log(`📋 Reporte INEs desde Drive: ${registros.length} registros`);
 
     // Generar PDF
