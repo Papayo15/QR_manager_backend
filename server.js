@@ -1954,135 +1954,172 @@ app.get('/api/monthly-report-pdf', async (req, res) => {
 });
 
 // ============================================
-// ENDPOINT: Reporte PDF de todos los INEs
+// ENDPOINT: Reporte PDF de todos los INEs (con caché)
 // ============================================
+
+// Caché en memoria: { buffer, generatedAt, condominio }
+const reporteCache = new Map();
+
+async function generarReporteINEs(condominio) {
+  const folderCache = new Map();
+  const registros = [];
+
+  async function getFolderInfo(folderId) {
+    if (!folderId) return null;
+    if (folderCache.has(folderId)) return folderCache.get(folderId);
+    try {
+      const f = await driveService.files.get({ fileId: folderId, fields: 'id,name,parents' });
+      const info = { name: f.data.name, parentId: f.data.parents?.[0] };
+      folderCache.set(folderId, info);
+      return info;
+    } catch { return null; }
+  }
+
+  let pageToken = null;
+  const imageFiles = [];
+  do {
+    const resp = await driveService.files.list({
+      q: `mimeType contains 'image/' and trashed=false`,
+      fields: 'nextPageToken,files(id,name,parents,createdTime)',
+      pageSize: 1000,
+      ...(pageToken && { pageToken })
+    });
+    imageFiles.push(...(resp.data.files || []));
+    pageToken = resp.data.nextPageToken;
+  } while (pageToken);
+
+  for (const file of imageFiles) {
+    if (file.name.toLowerCase().includes('trasera')) continue;
+    const casaFolder  = await getFolderInfo(file.parents?.[0]);
+    if (!casaFolder?.name?.startsWith('Casa_')) continue;
+    const dayFolder   = await getFolderInfo(casaFolder.parentId);
+    const monthFolder = await getFolderInfo(dayFolder?.parentId);
+    const yearFolder  = await getFolderInfo(monthFolder?.parentId);
+    const condFolder  = await getFolderInfo(yearFolder?.parentId);
+    if (!condFolder) continue;
+    if (condominio && condFolder.name.toLowerCase() !== condominio.toLowerCase()) continue;
+
+    const parts = file.name.replace(/\.[^.]+$/, '').split('_');
+    let nombre = parts[0] || 'Desconocido';
+    let tipo = '';
+    for (let i = 1; i < parts.length; i++) {
+      if (/^\d{2}h\d{2}$/.test(parts[i])) {
+        tipo = parts[i - 1] || '';
+        nombre = parts.slice(0, i - 1).join(' ') || parts[0];
+        break;
+      }
+    }
+    registros.push({
+      nombre, tipo,
+      casa: casaFolder.name.replace('Casa_', ''),
+      condominio: condFolder.name,
+      fecha: `${dayFolder?.name || '?'}/${monthFolder?.name || '?'}/${yearFolder?.name || '?'}`,
+      sortKey: `${condFolder.name}_${yearFolder?.name}_${monthFolder?.name}_${(dayFolder?.name||'').padStart(2,'0')}_${casaFolder.name}`
+    });
+  }
+
+  registros.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+  console.log(`📋 Reporte INEs desde Drive: ${registros.length} registros`);
+
+  const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  const hoy = new Date();
+  const hoyStr = `${String(hoy.getDate()).padStart(2,'0')}/${monthNames[hoy.getMonth()]}/${hoy.getFullYear()}`;
+  const titulo = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
+
+  const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
+  const chunks = [];
+  doc.on('data', c => chunks.push(c));
+
+  doc.fontSize(16).font('Helvetica-Bold').text('REPORTE DE INEs REGISTRADOS', { align: 'center' });
+  doc.fontSize(11).font('Helvetica').text(titulo, { align: 'center' });
+  doc.fontSize(9).text(`Generado: ${hoyStr}  |  Total: ${registros.length} registros`, { align: 'center' });
+  doc.moveDown(0.8);
+
+  const col = { num: 40, nombre: 65, tipo: 250, casa: 355, condo: 395, fecha: 480 };
+  const headerY = doc.y;
+  doc.font('Helvetica-Bold').fontSize(8);
+  doc.text('#',       col.num,    headerY);
+  doc.text('Nombre',  col.nombre, headerY);
+  doc.text('Tipo',    col.tipo,   headerY);
+  doc.text('Casa',    col.casa,   headerY);
+  doc.text('Cond.',   col.condo,  headerY);
+  doc.text('Fecha',   col.fecha,  headerY);
+  doc.moveDown(0.4);
+  doc.moveTo(40, doc.y).lineTo(570, doc.y).stroke();
+  doc.moveDown(0.3);
+
+  doc.font('Helvetica').fontSize(8);
+  registros.forEach((r, i) => {
+    if (doc.y > 720) doc.addPage();
+    const y = doc.y;
+    doc.text(String(i + 1),  col.num,    y);
+    doc.text(r.nombre,       col.nombre, y, { width: 180 });
+    doc.text(r.tipo,         col.tipo,   y, { width: 100 });
+    doc.text(r.casa,         col.casa,   y);
+    doc.text(r.condominio,   col.condo,  y, { width: 80 });
+    doc.text(r.fecha,        col.fecha,  y);
+    doc.moveDown(0.6);
+  });
+
+  doc.end();
+  await new Promise(resolve => doc.on('end', resolve));
+  return Buffer.concat(chunks);
+}
+
+// Regenerar caché cada 30 minutos en background
+setInterval(async () => {
+  if (!driveService) return;
+  try {
+    console.log('🔄 Regenerando caché de reporte INEs...');
+    const buffer = await generarReporteINEs(null);
+    reporteCache.set('todos', { buffer, generatedAt: new Date() });
+    console.log('✅ Caché de reporte INEs actualizada');
+  } catch (e) {
+    console.error('⚠️ Error regenerando caché reporte:', e.message);
+  }
+}, 30 * 60 * 1000);
 
 app.get('/api/reporte-ines-pdf', async (req, res) => {
   try {
     if (!driveService) return res.status(503).json({ success: false, error: 'Drive no disponible' });
 
     const { condominio } = req.query;
-    const registros = [];
-    const folderCache = new Map();
+    const cacheKey = condominio || 'todos';
+    const cached = reporteCache.get(cacheKey);
 
-    // Obtener info de carpeta con caché (evita llamadas repetidas)
-    async function getFolderInfo(folderId) {
-      if (!folderId) return null;
-      if (folderCache.has(folderId)) return folderCache.get(folderId);
-      try {
-        const f = await driveService.files.get({ fileId: folderId, fields: 'id,name,parents' });
-        const info = { name: f.data.name, parentId: f.data.parents?.[0] };
-        folderCache.set(folderId, info);
-        return info;
-      } catch { return null; }
+    // Servir desde caché si existe
+    if (cached) {
+      const hoy = new Date();
+      const filename = `Reporte_INEs_${cacheKey}_${hoy.toISOString().split('T')[0]}.pdf`;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(cached.buffer);
     }
 
-    // UNA sola búsqueda de todas las imágenes en Drive
-    let pageToken = null;
-    const imageFiles = [];
-    do {
-      const resp = await driveService.files.list({
-        q: `mimeType contains 'image/' and trashed=false`,
-        fields: 'nextPageToken,files(id,name,parents,createdTime)',
-        pageSize: 1000,
-        ...(pageToken && { pageToken })
-      });
-      imageFiles.push(...(resp.data.files || []));
-      pageToken = resp.data.nextPageToken;
-    } while (pageToken);
-
-    console.log(`🔍 Total imágenes encontradas en Drive: ${imageFiles.length}`);
-
-    // Resolver estructura de carpetas para cada archivo (con caché)
-    for (const file of imageFiles) {
-      if (file.name.toLowerCase().includes('trasera')) continue;
-
-      const casaFolder  = await getFolderInfo(file.parents?.[0]);
-      if (!casaFolder?.name?.startsWith('Casa_')) continue;
-
-      const dayFolder   = await getFolderInfo(casaFolder.parentId);
-      const monthFolder = await getFolderInfo(dayFolder?.parentId);
-      const yearFolder  = await getFolderInfo(monthFolder?.parentId);
-      const condFolder  = await getFolderInfo(yearFolder?.parentId);
-
-      if (!condFolder) continue;
-      if (condominio && condFolder.name.toLowerCase() !== condominio.toLowerCase()) continue;
-
-      // Extraer nombre y tipo del nombre del archivo
-      const parts = file.name.replace(/\.[^.]+$/, '').split('_');
-      let nombre = parts[0] || 'Desconocido';
-      let tipo = '';
-      for (let i = 1; i < parts.length; i++) {
-        if (/^\d{2}h\d{2}$/.test(parts[i])) {
-          tipo = parts[i - 1] || '';
-          nombre = parts.slice(0, i - 1).join(' ') || parts[0];
-          break;
-        }
-      }
-
-      registros.push({
-        nombre, tipo,
-        casa: casaFolder.name.replace('Casa_', ''),
-        condominio: condFolder.name,
-        fecha: `${dayFolder?.name || '?'}/${monthFolder?.name || '?'}/${yearFolder?.name || '?'}`,
-        sortKey: `${condFolder.name}_${yearFolder?.name}_${monthFolder?.name}_${(dayFolder?.name || '').padStart(2,'0')}_${casaFolder.name}`
+    // Si no hay caché, generar en background y avisar
+    if (!reporteCache.has('_generando_' + cacheKey)) {
+      reporteCache.set('_generando_' + cacheKey, true);
+      generarReporteINEs(condominio || null).then(buffer => {
+        reporteCache.set(cacheKey, { buffer, generatedAt: new Date() });
+        reporteCache.delete('_generando_' + cacheKey);
+        console.log(`✅ Reporte INEs "${cacheKey}" listo en caché`);
+      }).catch(e => {
+        reporteCache.delete('_generando_' + cacheKey);
+        console.error('❌ Error generando reporte:', e.message);
       });
     }
 
-    registros.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-    console.log(`📋 Reporte INEs desde Drive: ${registros.length} registros`);
-
-    // Generar PDF
-    const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
-    const chunks = [];
-    doc.on('data', c => chunks.push(c));
-
-    const titulo = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
-    const hoy = new Date();
-    const hoyStr = `${String(hoy.getDate()).padStart(2,'0')}/${monthNames[hoy.getMonth()]}/${hoy.getFullYear()}`;
-
-    doc.fontSize(16).font('Helvetica-Bold').text('REPORTE DE INEs REGISTRADOS', { align: 'center' });
-    doc.fontSize(11).font('Helvetica').text(titulo, { align: 'center' });
-    doc.fontSize(9).text(`Generado: ${hoyStr}  |  Total: ${registros.length} registros`, { align: 'center' });
-    doc.moveDown(0.8);
-
-    const col = { num: 40, nombre: 65, tipo: 250, casa: 355, condo: 395, fecha: 480 };
-    const headerY = doc.y;
-    doc.font('Helvetica-Bold').fontSize(8);
-    doc.text('#',       col.num,    headerY);
-    doc.text('Nombre',  col.nombre, headerY);
-    doc.text('Tipo',    col.tipo,   headerY);
-    doc.text('Casa',    col.casa,   headerY);
-    doc.text('Cond.',   col.condo,  headerY);
-    doc.text('Fecha',   col.fecha,  headerY);
-    doc.moveDown(0.4);
-    doc.moveTo(40, doc.y).lineTo(570, doc.y).stroke();
-    doc.moveDown(0.3);
-
-    doc.font('Helvetica').fontSize(8);
-    registros.forEach((r, i) => {
-      if (doc.y > 720) doc.addPage();
-      const y = doc.y;
-      doc.text(String(i + 1),  col.num,    y);
-      doc.text(r.nombre,       col.nombre, y, { width: 180 });
-      doc.text(r.tipo,         col.tipo,   y, { width: 100 });
-      doc.text(r.casa,         col.casa,   y);
-      doc.text(r.condominio,   col.condo,  y, { width: 80 });
-      doc.text(r.fecha,        col.fecha,  y);
-      doc.moveDown(0.6);
-    });
-
-    doc.end();
-    await new Promise(resolve => doc.on('end', resolve));
-    const pdfBuffer = Buffer.concat(chunks);
-
-    const filename = `Reporte_INEs_${condominio || 'Todos'}_${hoy.toISOString().split('T')[0]}.pdf`;
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(pdfBuffer);
+    res.status(202).send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+        <h2>⏳ Generando reporte...</h2>
+        <p>El reporte se está generando por primera vez (puede tardar 1-2 minutos).</p>
+        <p>Esta página se recargará automáticamente.</p>
+        <script>setTimeout(() => location.reload(), 15000)</script>
+      </body></html>
+    `);
 
   } catch (error) {
-    console.error('❌ Error generando reporte INEs:', error.message);
+    console.error('❌ Error en reporte INEs:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
