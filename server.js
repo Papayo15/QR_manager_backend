@@ -1954,6 +1954,81 @@ app.get('/api/monthly-report-pdf', async (req, res) => {
 });
 
 // ============================================
+// ENDPOINT: Reporte PDF de todos los INEs
+// ============================================
+
+app.get('/api/reporte-ines-pdf', async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ success: false, error: 'Base de datos no disponible' });
+
+    const { condominio } = req.query;
+    const filtro = { status: 'activo' };
+    if (condominio) filtro.condominio = condominio;
+
+    const ines = await db.collection('ines').find(filtro).sort({ condominio: 1, houseNumber: 1, createdAt: 1 }).toArray();
+
+    const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+    const formatDate = (iso) => {
+      const d = new Date(iso);
+      return `${String(d.getDate()).padStart(2,'0')}/${monthNames[d.getMonth()]}/${d.getFullYear()}`;
+    };
+
+    const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+
+    const title = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
+    const now = formatDate(new Date().toISOString());
+
+    doc.fontSize(16).font('Helvetica-Bold').text('REPORTE DE INEs REGISTRADOS', { align: 'center' });
+    doc.fontSize(11).font('Helvetica').text(title, { align: 'center' });
+    doc.fontSize(9).text(`Generado: ${now}  |  Total: ${ines.length} registros`, { align: 'center' });
+    doc.moveDown(0.8);
+
+    // Encabezado tabla
+    const col = { num: 40, nombre: 65, casa: 320, condo: 370, fecha: 460 };
+    doc.font('Helvetica-Bold').fontSize(9);
+    doc.text('#', col.num, doc.y, { continued: false });
+    const headerY = doc.y - doc.currentLineHeight();
+    doc.text('#',       col.num,    headerY);
+    doc.text('Nombre',  col.nombre, headerY);
+    doc.text('Casa',    col.casa,   headerY);
+    doc.text('Cond.',   col.condo,  headerY);
+    doc.text('Fecha',   col.fecha,  headerY);
+    doc.moveDown(0.3);
+    doc.moveTo(40, doc.y).lineTo(570, doc.y).stroke();
+    doc.moveDown(0.3);
+
+    doc.font('Helvetica').fontSize(8);
+    ines.forEach((ine, i) => {
+      if (doc.y > 720) { doc.addPage(); }
+      const y = doc.y;
+      const nombre = `${ine.nombre || ''}${ine.apellido ? ' ' + ine.apellido : ''}`.trim() || 'Sin nombre';
+      doc.text(String(i + 1),        col.num,    y);
+      doc.text(nombre,               col.nombre, y, { width: 245 });
+      doc.text(String(ine.houseNumber || '-'), col.casa, y);
+      doc.text(ine.condominio || '-', col.condo, y, { width: 80 });
+      doc.text(ine.createdAt ? formatDate(ine.createdAt) : '-', col.fecha, y);
+      doc.moveDown(0.6);
+    });
+
+    doc.end();
+
+    await new Promise(resolve => doc.on('end', resolve));
+    const pdfBuffer = Buffer.concat(chunks);
+
+    const filename = `Reporte_INEs_${condominio || 'Todos'}_${new Date().toISOString().split('T')[0]}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdfBuffer);
+
+  } catch (error) {
+    console.error('❌ Error generando reporte INEs:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================
 // ENDPOINT: Reset Sistema (Admin)
 // ============================================
 
