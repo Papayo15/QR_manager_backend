@@ -2035,31 +2035,31 @@ async function generarReporteINEs(condominio) {
   doc.fontSize(9).text(`Generado: ${hoyStr}  |  Total: ${registros.length} registros`, { align: 'center' });
   doc.moveDown(0.8);
 
-  const col = { num: 40, nombre: 65, tipo: 250, casa: 355, condo: 395, fecha: 480 };
-  const headerY = doc.y;
-  doc.font('Helvetica-Bold').fontSize(8);
-  doc.text('#',       col.num,    headerY);
-  doc.text('Nombre',  col.nombre, headerY);
-  doc.text('Tipo',    col.tipo,   headerY);
-  doc.text('Casa',    col.casa,   headerY);
-  doc.text('Cond.',   col.condo,  headerY);
-  doc.text('Fecha',   col.fecha,  headerY);
-  doc.moveDown(0.4);
-  doc.moveTo(40, doc.y).lineTo(570, doc.y).stroke();
-  doc.moveDown(0.3);
+  const RH = 14; // altura fija por fila
+  const col = { num: 40, nombre: 60, tipo: 240, casa: 340, condo: 375, fecha: 460 };
+  const colW = { num: 18, nombre: 175, tipo: 95, casa: 30, condo: 80, fecha: 100 };
 
-  doc.font('Helvetica').fontSize(8);
+  const drawRow = (y, num, nombre, tipo, casa, condo, fecha, bold) => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
+    doc.text(num,    col.num,    y, { width: colW.num,    lineBreak: false, ellipsis: true });
+    doc.text(nombre, col.nombre, y, { width: colW.nombre, lineBreak: false, ellipsis: true });
+    doc.text(tipo,   col.tipo,   y, { width: colW.tipo,   lineBreak: false, ellipsis: true });
+    doc.text(casa,   col.casa,   y, { width: colW.casa,   lineBreak: false, ellipsis: true });
+    doc.text(condo,  col.condo,  y, { width: colW.condo,  lineBreak: false, ellipsis: true });
+    doc.text(fecha,  col.fecha,  y, { width: colW.fecha,  lineBreak: false, ellipsis: true });
+  };
+
+  let curY = doc.y;
+  drawRow(curY, '#', 'Nombre', 'Tipo', 'Casa', 'Cond.', 'Fecha', true);
+  curY += RH;
+  doc.moveTo(40, curY - 2).lineTo(570, curY - 2).stroke();
+
   registros.forEach((r, i) => {
-    if (doc.y > 720) doc.addPage();
-    const y = doc.y;
-    doc.text(String(i + 1),  col.num,    y);
-    doc.text(r.nombre,       col.nombre, y, { width: 180 });
-    doc.text(r.tipo,         col.tipo,   y, { width: 100 });
-    doc.text(r.casa,         col.casa,   y);
-    doc.text(r.condominio,   col.condo,  y, { width: 80 });
-    doc.text(r.fecha,        col.fecha,  y);
-    doc.moveDown(0.6);
+    if (curY > 730) { doc.addPage(); curY = 50; }
+    drawRow(curY, String(i + 1), r.nombre, r.tipo, r.casa, r.condominio, r.fecha, false);
+    curY += RH;
   });
+  doc.y = curY;
 
   doc.end();
   await new Promise(resolve => doc.on('end', resolve));
@@ -2209,50 +2209,45 @@ async function generarConcentrado(condominio) {
   doc.fontSize(9).text(`Generado: ${hoyStr}`, { align: 'center' });
   doc.moveDown(0.8);
 
-  // Tabla: columna mes + una columna por tipo
-  const colWidth = Math.min(80, Math.floor((750 - 90) / Math.max(tipos.length, 1)));
+  // Tabla con altura fija por fila
+  const RH = 16;
+  const CW = Math.min(75, Math.floor((710 - 90) / Math.max(tipos.length, 1)));
   const mesCol = 40;
-  const tiposCols = tipos.map((_, i) => mesCol + 90 + i * colWidth);
-  const totalCol = mesCol + 90 + tipos.length * colWidth;
+  const tiposCols = tipos.map((_, i) => mesCol + 90 + i * CW);
+  const totalCol = mesCol + 90 + tipos.length * CW;
+  const tableEnd = totalCol + 55;
 
-  // Encabezado
-  let hY = doc.y;
-  doc.font('Helvetica-Bold').fontSize(7);
-  doc.text('Mes', mesCol, hY, { width: 85 });
-  tipos.forEach((t, i) => doc.text(t, tiposCols[i], hY, { width: colWidth - 2 }));
-  doc.text('TOTAL', totalCol, hY, { width: 60 });
-  doc.moveDown(0.3);
-  doc.moveTo(mesCol, doc.y).lineTo(totalCol + 60, doc.y).stroke();
-  doc.moveDown(0.3);
+  const drawConcentradoRow = (y, mesLabel, tiposData, total, bold) => {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
+    doc.text(mesLabel, mesCol, y, { width: 85, lineBreak: false, ellipsis: true });
+    tipos.forEach((t, i) => {
+      const val = tiposData[t] != null ? String(tiposData[t]) : '-';
+      doc.text(val, tiposCols[i], y, { width: CW - 2, lineBreak: false, ellipsis: true });
+    });
+    doc.text(String(total), totalCol, y, { width: 55, lineBreak: false });
+  };
 
-  doc.font('Helvetica').fontSize(7);
+  let curY = doc.y;
+  drawConcentradoRow(curY, 'Mes', Object.fromEntries(tipos.map(t => [t, t])), 'TOTAL', true);
+  curY += RH;
+  doc.moveTo(mesCol, curY - 2).lineTo(tableEnd, curY - 2).stroke();
+
   let grandTotal = 0;
   const totalesPorTipo = {};
 
   meses.forEach(key => {
-    if (doc.y > 510) doc.addPage();
+    if (curY > 530) { doc.addPage(); curY = 50; }
     const row = datos[key];
-    const y = doc.y;
     const totalMes = Object.values(row.tipos).reduce((s, n) => s + n, 0);
     grandTotal += totalMes;
-    doc.text(row.label, mesCol, y, { width: 85 });
-    tipos.forEach((t, i) => {
-      const n = row.tipos[t] || 0;
-      totalesPorTipo[t] = (totalesPorTipo[t] || 0) + n;
-      doc.text(n > 0 ? String(n) : '-', tiposCols[i], y, { width: colWidth - 2 });
-    });
-    doc.text(String(totalMes), totalCol, y, { width: 60 });
-    doc.moveDown(0.5);
+    tipos.forEach(t => { totalesPorTipo[t] = (totalesPorTipo[t] || 0) + (row.tipos[t] || 0); });
+    drawConcentradoRow(curY, row.label, row.tipos, totalMes, false);
+    curY += RH;
   });
 
-  // Fila totales
-  doc.moveTo(mesCol, doc.y).lineTo(totalCol + 60, doc.y).stroke();
-  doc.moveDown(0.2);
-  const tY = doc.y;
-  doc.font('Helvetica-Bold').fontSize(7);
-  doc.text('TOTAL', mesCol, tY, { width: 85 });
-  tipos.forEach((t, i) => doc.text(String(totalesPorTipo[t] || 0), tiposCols[i], tY, { width: colWidth - 2 }));
-  doc.text(String(grandTotal), totalCol, tY, { width: 60 });
+  doc.moveTo(mesCol, curY).lineTo(tableEnd, curY).stroke();
+  curY += 4;
+  drawConcentradoRow(curY, 'TOTAL', totalesPorTipo, grandTotal, true);
 
   doc.end();
   await new Promise(resolve => doc.on('end', resolve));
