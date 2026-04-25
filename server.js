@@ -2130,6 +2130,61 @@ app.get('/api/reporte-ines-pdf', async (req, res) => {
 
 const concentradoCache = new Map();
 
+// Normaliza plural/singular y sinónimos para agrupar tipos de personal
+function normalizarTipo(raw) {
+  if (!raw || raw === 'General') return 'General';
+  let t = raw.trim().toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '') // quitar acentos para comparar
+    .normalize('NFC');
+
+  const canon = {
+    // Sirvientas / empleadas domésticas
+    'muchacha': 'Sirvienta', 'muchachas': 'Sirvienta',
+    'empleada': 'Sirvienta', 'empleadas': 'Sirvienta',
+    'empleada domestica': 'Sirvienta', 'empleadas domesticas': 'Sirvienta',
+    'domestica': 'Sirvienta', 'domesticas': 'Sirvienta',
+    'sirvienta': 'Sirvienta', 'sirvientas': 'Sirvienta',
+    'sirviente': 'Sirvienta', 'sirvientes': 'Sirvienta',
+    // Albañiles / obreros
+    'albanil': 'Albañil', 'albaniles': 'Albañil',
+    'obrero': 'Albañil', 'obreros': 'Albañil',
+    'trabajador': 'Albañil', 'trabajadores': 'Albañil',
+    'peon': 'Albañil', 'peones': 'Albañil',
+    // Repartidores / delivery
+    'repartidor': 'Repartidor', 'repartidores': 'Repartidor',
+    'delivery': 'Repartidor', 'deliveries': 'Repartidor',
+    'mensajero': 'Repartidor', 'mensajeros': 'Repartidor',
+    // Jardineros
+    'jardinero': 'Jardinero', 'jardineros': 'Jardinero',
+    // Plomeros / fontaneros
+    'plomero': 'Plomero', 'plomeros': 'Plomero',
+    'fontanero': 'Plomero', 'fontaneros': 'Plomero',
+    // Electricistas
+    'electricista': 'Electricista', 'electricistas': 'Electricista',
+    // Choferes
+    'chofer': 'Chofer', 'choferes': 'Chofer',
+    'conductor': 'Chofer', 'conductores': 'Chofer',
+    // Vigilantes / guardias
+    'vigilante': 'Vigilante', 'vigilantes': 'Vigilante',
+    'guardia': 'Vigilante', 'guardias': 'Vigilante',
+    // Proveedores
+    'proveedor': 'Proveedor', 'proveedores': 'Proveedor',
+    // Pintores
+    'pintor': 'Pintor', 'pintores': 'Pintor',
+    // Técnicos
+    'tecnico': 'Técnico', 'tecnicos': 'Técnico',
+  };
+
+  if (canon[t]) return canon[t];
+
+  // Plurales genéricos en español: quitar -es (albañiles→albañil) o -s final
+  let singular = t;
+  if (singular.endsWith('es') && singular.length > 4) singular = singular.slice(0, -2);
+  else if (singular.endsWith('s') && singular.length > 3) singular = singular.slice(0, -1);
+
+  return singular.charAt(0).toUpperCase() + singular.slice(1);
+}
+
 async function generarConcentrado(condominio) {
   const folderCache = new Map();
 
@@ -2158,10 +2213,10 @@ async function generarConcentrado(condominio) {
     pageToken = resp.data.nextPageToken;
   } while (pageToken);
 
-  // Agrupar por mes y tipo: { 'Abr 2026': { 'Albañiles': 50, ... } }
-  const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  // Agrupar por mes y tipo
+  const monthNames     = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  const monthNamesFull = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
   const datos = {}; // { 'YYYY-MM': { label, tipos: { tipo: count } } }
-  const tiposSet = new Set();
 
   for (const file of imageFiles) {
     if (file.name.toLowerCase().includes('trasera')) continue;
@@ -2177,25 +2232,24 @@ async function generarConcentrado(condominio) {
     const monthIdx = monthNames.indexOf(monthFolder?.name);
     if (monthIdx === -1) continue;
     const key = `${yearFolder?.name}-${String(monthIdx + 1).padStart(2,'0')}`;
-    const label = `${monthFolder?.name} ${yearFolder?.name}`;
+    const label = `${monthNamesFull[monthIdx]} ${yearFolder?.name}`;
 
     if (!datos[key]) datos[key] = { label, tipos: {} };
 
-    // Extraer tipo del nombre del archivo
+    // Extraer tipo del nombre del archivo y normalizar
     const parts = file.name.replace(/\.[^.]+$/, '').split('_');
-    let tipo = 'General';
+    let rawTipo = 'General';
     for (let i = 1; i < parts.length; i++) {
-      if (/^\d{2}h\d{2}$/.test(parts[i])) { tipo = parts[i - 1] || 'General'; break; }
+      if (/^\d{2}h\d{2}$/.test(parts[i])) { rawTipo = parts[i - 1] || 'General'; break; }
     }
+    const tipo = normalizarTipo(rawTipo);
     datos[key].tipos[tipo] = (datos[key].tipos[tipo] || 0) + 1;
-    tiposSet.add(tipo);
   }
 
   const meses = Object.keys(datos).sort();
-  const tipos = [...tiposSet].sort();
-  console.log(`📊 Concentrado: ${meses.length} meses, ${tipos.length} tipos`);
+  console.log(`📊 Concentrado: ${meses.length} meses`);
 
-  // Generar PDF — 3 columnas simples: Fecha | Tipo | Registros
+  // Generar PDF — 3 columnas: Fecha | Tipo | Registros
   const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
   const chunks = [];
   doc.on('data', c => chunks.push(c));
@@ -2204,45 +2258,50 @@ async function generarConcentrado(condominio) {
   const hoyStr = `${String(hoy.getDate()).padStart(2,'0')}/${monthNames[hoy.getMonth()]}/${hoy.getFullYear()}`;
   const titulo = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
 
-  doc.fontSize(16).font('Helvetica-Bold').text('CONCENTRADO DE PERSONAL POR MES', { align: 'center' });
-  doc.fontSize(11).font('Helvetica').text(titulo, { align: 'center' });
-  doc.fontSize(9).text(`Generado: ${hoyStr}`, { align: 'center' });
-  doc.moveDown(0.8);
+  doc.fontSize(14).font('Helvetica-Bold').text('CONCENTRADO DE PERSONAL POR MES', { align: 'center' });
+  doc.fontSize(10).font('Helvetica').text(titulo, { align: 'center' });
+  doc.fontSize(8).text(`Generado: ${hoyStr}`, { align: 'center' });
+  doc.moveDown(0.5);
 
-  const RH = 16;
-  const cFecha = 40;  const wFecha = 100;
-  const cTipo  = 160; const wTipo  = 280;
-  const cRegs  = 460; const wRegs  = 80;
+  const RH = 13;          // altura de cada fila (más compacto)
+  const cFecha = 40;  const wFecha = 130;   // "Septiembre 2025"
+  const cTipo  = 180; const wTipo  = 260;
+  const cRegs  = 450; const wRegs  = 80;
 
   // Encabezado
   let curY = doc.y;
-  doc.font('Helvetica-Bold').fontSize(9);
+  doc.font('Helvetica-Bold').fontSize(8);
+  doc.rect(cFecha, curY - 2, wRegs + wTipo + wFecha + 10, RH + 2).fill('#eeeeee').fillColor('black');
   doc.text('Fecha',      cFecha, curY, { width: wFecha, lineBreak: false });
   doc.text('Tipo',       cTipo,  curY, { width: wTipo,  lineBreak: false });
   doc.text('Registros',  cRegs,  curY, { width: wRegs,  lineBreak: false });
-  curY += RH;
-  doc.moveTo(cFecha, curY - 2).lineTo(cRegs + wRegs, curY - 2).stroke();
+  curY += RH + 4;
 
   let grandTotal = 0;
 
   meses.forEach(key => {
     const row = datos[key];
-    Object.entries(row.tipos).sort((a,b) => b[1]-a[1]).forEach(([tipo, count]) => {
+    const entradas = Object.entries(row.tipos).sort((a,b) => b[1]-a[1]);
+    entradas.forEach(([tipo, count], idx) => {
       if (curY > 730) { doc.addPage(); curY = 50; }
-      doc.font('Helvetica').fontSize(9);
-      doc.text(row.label, cFecha, curY, { width: wFecha, lineBreak: false, ellipsis: true });
-      doc.text(tipo,      cTipo,  curY, { width: wTipo,  lineBreak: false, ellipsis: true });
-      doc.text(String(count), cRegs, curY, { width: wRegs, lineBreak: false });
+      doc.font(idx === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
+      // Fecha solo en la primera fila del mes
+      doc.text(idx === 0 ? row.label : '', cFecha, curY, { width: wFecha, lineBreak: false });
+      doc.font('Helvetica').fontSize(8);
+      doc.text(tipo,           cTipo, curY, { width: wTipo, lineBreak: false, ellipsis: true });
+      doc.text(String(count),  cRegs, curY, { width: wRegs, lineBreak: false });
       curY += RH;
       grandTotal += count;
     });
     // Línea separadora entre meses
-    doc.moveTo(cFecha, curY - 2).lineTo(cRegs + wRegs, curY - 2).strokeColor('#cccccc').stroke().strokeColor('black');
+    doc.moveTo(cFecha, curY).lineTo(cRegs + wRegs, curY).strokeColor('#bbbbbb').stroke().strokeColor('black');
+    curY += 4;
   });
 
   // Total general
-  curY += 4;
-  doc.font('Helvetica-Bold').fontSize(9);
+  curY += 2;
+  doc.font('Helvetica-Bold').fontSize(8);
+  doc.rect(cFecha, curY - 1, wRegs + wTipo + wFecha + 10, RH + 1).fill('#dddddd').fillColor('black');
   doc.text('TOTAL GENERAL', cFecha, curY, { width: wFecha + wTipo, lineBreak: false });
   doc.text(String(grandTotal), cRegs, curY, { width: wRegs, lineBreak: false });
 
