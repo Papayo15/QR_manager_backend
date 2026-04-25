@@ -2195,8 +2195,8 @@ async function generarConcentrado(condominio) {
   const tipos = [...tiposSet].sort();
   console.log(`📊 Concentrado: ${meses.length} meses, ${tipos.length} tipos`);
 
-  // Generar PDF
-  const doc = new PDFDocument({ margin: 40, size: 'LETTER', layout: 'landscape' });
+  // Generar PDF — 3 columnas simples: Fecha | Tipo | Registros
+  const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
   const chunks = [];
   doc.on('data', c => chunks.push(c));
 
@@ -2209,45 +2209,42 @@ async function generarConcentrado(condominio) {
   doc.fontSize(9).text(`Generado: ${hoyStr}`, { align: 'center' });
   doc.moveDown(0.8);
 
-  // Tabla con altura fija por fila
   const RH = 16;
-  const CW = Math.min(75, Math.floor((710 - 90) / Math.max(tipos.length, 1)));
-  const mesCol = 40;
-  const tiposCols = tipos.map((_, i) => mesCol + 90 + i * CW);
-  const totalCol = mesCol + 90 + tipos.length * CW;
-  const tableEnd = totalCol + 55;
+  const cFecha = 40;  const wFecha = 100;
+  const cTipo  = 160; const wTipo  = 280;
+  const cRegs  = 460; const wRegs  = 80;
 
-  const drawConcentradoRow = (y, mesLabel, tiposData, total, bold) => {
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
-    doc.text(mesLabel, mesCol, y, { width: 85, lineBreak: false, ellipsis: true });
-    tipos.forEach((t, i) => {
-      const val = tiposData[t] != null ? String(tiposData[t]) : '-';
-      doc.text(val, tiposCols[i], y, { width: CW - 2, lineBreak: false, ellipsis: true });
-    });
-    doc.text(String(total), totalCol, y, { width: 55, lineBreak: false });
-  };
-
+  // Encabezado
   let curY = doc.y;
-  drawConcentradoRow(curY, 'Mes', Object.fromEntries(tipos.map(t => [t, t])), 'TOTAL', true);
+  doc.font('Helvetica-Bold').fontSize(9);
+  doc.text('Fecha',      cFecha, curY, { width: wFecha, lineBreak: false });
+  doc.text('Tipo',       cTipo,  curY, { width: wTipo,  lineBreak: false });
+  doc.text('Registros',  cRegs,  curY, { width: wRegs,  lineBreak: false });
   curY += RH;
-  doc.moveTo(mesCol, curY - 2).lineTo(tableEnd, curY - 2).stroke();
+  doc.moveTo(cFecha, curY - 2).lineTo(cRegs + wRegs, curY - 2).stroke();
 
   let grandTotal = 0;
-  const totalesPorTipo = {};
 
   meses.forEach(key => {
-    if (curY > 530) { doc.addPage(); curY = 50; }
     const row = datos[key];
-    const totalMes = Object.values(row.tipos).reduce((s, n) => s + n, 0);
-    grandTotal += totalMes;
-    tipos.forEach(t => { totalesPorTipo[t] = (totalesPorTipo[t] || 0) + (row.tipos[t] || 0); });
-    drawConcentradoRow(curY, row.label, row.tipos, totalMes, false);
-    curY += RH;
+    Object.entries(row.tipos).sort((a,b) => b[1]-a[1]).forEach(([tipo, count]) => {
+      if (curY > 730) { doc.addPage(); curY = 50; }
+      doc.font('Helvetica').fontSize(9);
+      doc.text(row.label, cFecha, curY, { width: wFecha, lineBreak: false, ellipsis: true });
+      doc.text(tipo,      cTipo,  curY, { width: wTipo,  lineBreak: false, ellipsis: true });
+      doc.text(String(count), cRegs, curY, { width: wRegs, lineBreak: false });
+      curY += RH;
+      grandTotal += count;
+    });
+    // Línea separadora entre meses
+    doc.moveTo(cFecha, curY - 2).lineTo(cRegs + wRegs, curY - 2).strokeColor('#cccccc').stroke().strokeColor('black');
   });
 
-  doc.moveTo(mesCol, curY).lineTo(tableEnd, curY).stroke();
+  // Total general
   curY += 4;
-  drawConcentradoRow(curY, 'TOTAL', totalesPorTipo, grandTotal, true);
+  doc.font('Helvetica-Bold').fontSize(9);
+  doc.text('TOTAL GENERAL', cFecha, curY, { width: wFecha + wTipo, lineBreak: false });
+  doc.text(String(grandTotal), cRegs, curY, { width: wRegs, lineBreak: false });
 
   doc.end();
   await new Promise(resolve => doc.on('end', resolve));

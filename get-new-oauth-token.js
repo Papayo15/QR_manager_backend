@@ -11,7 +11,7 @@ const CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET;
 const REDIRECT_URI = 'http://localhost:3000/oauth2callback';
 
 const SCOPES = [
-  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive',
   'https://www.googleapis.com/auth/spreadsheets'
 ];
 
