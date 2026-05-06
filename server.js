@@ -2150,13 +2150,50 @@ function normalizarTipo(raw) {
 
   // Proveedores / prestadores de servicio
   const proveedores = [
+    // Genéricos
     'proveedor','proveedores','prestador','prestadores','servicio','servicios',
-    'electricista','electricistas','tecnico','tecnicos','mantenimiento',
-    'jardinero','jardineros','podador','podadores','fumigador','fumigadores',
-    'cerrajero','cerrajeros','limpieza','empleado','empleados',
-    'instalador','instaladores','mecanico','mecanicos','refrigeracion',
-    'veterinario','veterinarios','medico','medicos','doctor','doctores',
+    'mantenimiento','reparacion','reparaciones','instalacion','instalaciones',
+    // Técnicos y oficios
+    'electricista','electricistas','tecnico','tecnicos','instalador','instaladores',
+    'cerrajero','cerrajeros','mecanico','mecanicos','refrigeracion','aire acondicionado',
+    'gasero','gaseros','plomero','plomeros','fontanero','fontaneros',
+    'soldador','soldadores','herrero','herreros','carpintero','carpinteros',
+    // Limpieza / mantenimiento
+    'limpieza','limpiador','limpiadores','fumigador','fumigadores',
+    'desinfeccion','lavanderia','lavado','fumigacion',
+    // Jardín
+    'jardinero','jardineros','podador','podadores','paisajista','paisajistas',
+    // Salud y bienestar
+    'medico','medicos','doctor','doctores','doctora','doctoras',
+    'enfermera','enfermeras','enfermero','enfermeros',
+    'fisioterapeuta','fisioterapeutas','fisioterapia','fisiatra','fisiatras',
+    'psicologo','psicologos','psicologa','psicologas','psicologia',
+    'nutriologo','nutriologos','nutriologa','nutriologas','nutricionista','nutricionistas',
+    'dentista','dentistas','odontologo','odontologos','optometrista','optometristas',
+    'terapeuta','terapeutas','terapia','masajista','masajistas','masaje',
+    'pediatra','pediatras','geriatra','geriatras','gerontologo','gerontologos',
+    'veterinario','veterinarios','veterinaria',
+    // Belleza y estética
+    'estetica','esteticista','esteticistas','cosmetologa','cosmetologas',
+    'estilista','estilistas','peluquero','peluqueros','manicurista','manicuristas',
+    'barbero','barberos','maquillista','maquillistas','spa',
+    // Fitness y deporte
+    'entrenador','entrenadores','entrenadora','entrenadoras',
+    'instructor','instructores','instructora','instructoras',
+    'yoga','pilates','crossfit',
+    // Profesionales / oficina
+    'contador','contadores','contadora','contadoras','contabilidad',
+    'abogado','abogados','abogada','abogadas','notario','notarios','notaria',
+    'arquitecto','arquitectos','arquitecta','arquitectas',
+    'ingeniero','ingenieros','ingeniera','ingenieras',
+    'disenador','disenadores','disenadora','disenadoras','diseñador','diseñadores',
+    'fotografo','fotografos','fotografa','fotografas','fotografia',
+    // Seguridad
     'vigilante','vigilantes','guardia','guardias','seguridad',
+    // Otros servicios comunes
+    'pintor','pintores','pintora','pintoras','decorador','decoradores',
+    'mudanza','mudanzas','cargador','cargadores','flete','fletes',
+    'alberca','piscina','plaga','control de plagas',
   ];
 
   // Repartidores
@@ -2196,6 +2233,10 @@ function normalizarTipo(raw) {
   if (taxis.some(k => t.includes(k)))         return 'Taxis de aplicación';
   if (repartidores.some(k => t.includes(k)))  return 'Repartidores';
   if (proveedores.some(k => t.includes(k)))   return 'Proveedores y/o prestadores de servicio';
+
+  // Fallback: sufijos comunes de profesión/servicio en español → Proveedores
+  const sufijosServicio = ['ista','logo','loga','atra','cion','sion','eria','terapia','terapia','nomia','nomia'];
+  if (sufijosServicio.some(s => t.endsWith(s))) return 'Proveedores y/o prestadores de servicio';
 
   return 'Otros';
 }
