@@ -2130,59 +2130,74 @@ app.get('/api/reporte-ines-pdf', async (req, res) => {
 
 const concentradoCache = new Map();
 
-// Normaliza plural/singular y sinónimos para agrupar tipos de personal
+// Clasifica cualquier tipo de personal en exactamente una de las 7 categorías oficiales
 function normalizarTipo(raw) {
-  if (!raw || raw === 'General') return 'General';
-  let t = raw.trim().toLowerCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '') // quitar acentos para comparar
+  if (!raw) return 'Otros';
+  // Quitar acentos y pasar a minúsculas para comparar
+  const t = raw.trim().toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .normalize('NFC');
 
-  const canon = {
-    // Sirvientas / empleadas domésticas
-    'muchacha': 'Sirvienta', 'muchachas': 'Sirvienta',
-    'empleada': 'Sirvienta', 'empleadas': 'Sirvienta',
-    'empleada domestica': 'Sirvienta', 'empleadas domesticas': 'Sirvienta',
-    'domestica': 'Sirvienta', 'domesticas': 'Sirvienta',
-    'sirvienta': 'Sirvienta', 'sirvientas': 'Sirvienta',
-    'sirviente': 'Sirvienta', 'sirvientes': 'Sirvienta',
-    // Albañiles / obreros
-    'albanil': 'Albañil', 'albaniles': 'Albañil',
-    'obrero': 'Albañil', 'obreros': 'Albañil',
-    'trabajador': 'Albañil', 'trabajadores': 'Albañil',
-    'peon': 'Albañil', 'peones': 'Albañil',
-    // Repartidores / delivery
-    'repartidor': 'Repartidor', 'repartidores': 'Repartidor',
-    'delivery': 'Repartidor', 'deliveries': 'Repartidor',
-    'mensajero': 'Repartidor', 'mensajeros': 'Repartidor',
-    // Jardineros
-    'jardinero': 'Jardinero', 'jardineros': 'Jardinero',
-    // Plomeros / fontaneros
-    'plomero': 'Plomero', 'plomeros': 'Plomero',
-    'fontanero': 'Plomero', 'fontaneros': 'Plomero',
-    // Electricistas
-    'electricista': 'Electricista', 'electricistas': 'Electricista',
-    // Choferes
-    'chofer': 'Chofer', 'choferes': 'Chofer',
-    'conductor': 'Chofer', 'conductores': 'Chofer',
-    // Vigilantes / guardias
-    'vigilante': 'Vigilante', 'vigilantes': 'Vigilante',
-    'guardia': 'Vigilante', 'guardias': 'Vigilante',
-    // Proveedores
-    'proveedor': 'Proveedor', 'proveedores': 'Proveedor',
-    // Pintores
-    'pintor': 'Pintor', 'pintores': 'Pintor',
-    // Técnicos
-    'tecnico': 'Técnico', 'tecnicos': 'Técnico',
-  };
+  // Trabajadores de la construcción
+  const construccion = [
+    'albanil','albaniles','obrero','obreros','peon','peones','maestro','maestros',
+    'construccion','constructor','constructores','carpintero','carpinteros',
+    'soldador','soldadores','fierrero','fierreros','herrero','herreros',
+    'yesero','yeseros','azulejista','azulejistas','plomero','plomeros',
+    'fontanero','fontaneros','pintor','pintores','ayudante','ayudantes',
+    'trabajador construccion','trabajadores construccion',
+  ];
 
-  if (canon[t]) return canon[t];
+  // Proveedores / prestadores de servicio
+  const proveedores = [
+    'proveedor','proveedores','prestador','prestadores','servicio','servicios',
+    'electricista','electricistas','tecnico','tecnicos','mantenimiento',
+    'jardinero','jardineros','podador','podadores','fumigador','fumigadores',
+    'cerrajero','cerrajeros','limpieza','empleado','empleados',
+    'instalador','instaladores','mecanico','mecanicos','refrigeracion',
+    'veterinario','veterinarios','medico','medicos','doctor','doctores',
+    'vigilante','vigilantes','guardia','guardias','seguridad',
+  ];
 
-  // Plurales genéricos en español: quitar -es (albañiles→albañil) o -s final
-  let singular = t;
-  if (singular.endsWith('es') && singular.length > 4) singular = singular.slice(0, -2);
-  else if (singular.endsWith('s') && singular.length > 3) singular = singular.slice(0, -1);
+  // Repartidores
+  const repartidores = [
+    'repartidor','repartidores','delivery','deliveries','mensajero','mensajeros',
+    'paqueteria','paquetero','paqueteros','correo','fedex','dhl','amazon',
+    'estafeta','ups','redpack',
+  ];
 
-  return singular.charAt(0).toUpperCase() + singular.slice(1);
+  // Taxis de aplicación
+  const taxis = [
+    'uber','didi','cabify','indriver','taxi','taxis','chofer','choferes',
+    'conductor','conductores','indrive','beat','taxista','taxistas',
+    'aplicacion','app','transporte','transferencia',
+  ];
+
+  // Trabajadoras domésticas
+  const domesticas = [
+    'sirvienta','sirvientas','sirviente','sirvientes','muchacha','muchachas',
+    'empleada domestica','empleadas domesticas','domestica','domesticas',
+    'nana','nanas','ninera','nineras','cocinera','cocineras',
+    'limpiadora','limpiadoras','trabajadora domestica','trabajadoras domesticas',
+    'mucamo','mucama','mucamos','mucamas',
+  ];
+
+  // Asesores inmobiliarios
+  const inmobiliarios = [
+    'asesor','asesores','asesor inmobiliario','asesores inmobiliarios',
+    'agente','agentes','agente inmobiliario','agentes inmobiliarios',
+    'realtor','realtors','corredor','corredores','inmobiliaria','inmobiliario',
+    'bienes raices','broker','brokers',
+  ];
+
+  if (construccion.some(k => t.includes(k))) return 'Trabajadores de la construcción';
+  if (inmobiliarios.some(k => t.includes(k)))  return 'Asesores inmobiliarios';
+  if (domesticas.some(k => t.includes(k)))     return 'Trabajadoras domésticas';
+  if (taxis.some(k => t.includes(k)))          return 'Taxis de aplicación';
+  if (repartidores.some(k => t.includes(k)))   return 'Repartidores';
+  if (proveedores.some(k => t.includes(k)))    return 'Proveedores';
+
+  return 'Otros';
 }
 
 async function generarConcentrado(condominio) {
