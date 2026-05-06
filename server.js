@@ -2138,31 +2138,50 @@ function normalizarTipo(raw) {
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .normalize('NFC');
 
-  // Trabajadores de la construcción
+  // Trabajadores de la construcción — todo lo que toca obra/edificación
   const construccion = [
-    'albanil','albaniles','obrero','obreros','peon','peones','maestro','maestros',
-    'construccion','constructor','constructores','carpintero','carpinteros',
+    // Mano de obra directa
+    'albanil','albaniles','obrero','obreros','peon','peones',
+    'ayudante','ayudantes','chalán','chalan','chalanes',
+    'maestro de obra','maestros de obra','maestro obra',
+    'construccion','constructor','constructores',
+    // Acabados / interiores
+    'yesero','yeseros','yeso','estucador','estucadores',
+    'azulejista','azulejistas','azulejo','azulejos',
+    'pintor','pintores','pintora','pintoras',
+    'tapicero','tapiceros','tapizador','tapizadores',
+    'piso','pisos','mosaico','mosaicos',
+    // Estructura / metal
+    'carpintero','carpinteros','carpinteria',
     'soldador','soldadores','fierrero','fierreros','herrero','herreros',
-    'yesero','yeseros','azulejista','azulejistas','plomero','plomeros',
-    'fontanero','fontaneros','pintor','pintores','ayudante','ayudantes',
-    'trabajador construccion','trabajadores construccion',
+    'vidriero','vidrieros','herreria','cristal','aluminio',
+    // Instalaciones de obra
+    'electricista','electricistas','electrico',
+    'plomero','plomeros','plomeria','fontanero','fontaneros',
+    'sanitario','sanitarios',
   ];
 
-  // Proveedores / prestadores de servicio
+  // Proveedores / prestadores de servicio — servicios a domicilio o al condominio
   const proveedores = [
-    // Genéricos
+    // Genérico
     'proveedor','proveedores','prestador','prestadores','servicio','servicios',
-    'mantenimiento','reparacion','reparaciones','instalacion','instalaciones',
-    // Técnicos y oficios
-    'electricista','electricistas','tecnico','tecnicos','instalador','instaladores',
-    'cerrajero','cerrajeros','mecanico','mecanicos','refrigeracion','aire acondicionado',
-    'gasero','gaseros','plomero','plomeros','fontanero','fontaneros',
-    'soldador','soldadores','herrero','herreros','carpintero','carpinteros',
-    // Limpieza / mantenimiento
+    // Telecomunicaciones
+    'telmex','izzi','totalplay','megacable','axtel','telecomunicaciones',
+    'internet','telefonia','cable','fibra','tecnico telmex','tecnico izzi',
+    // Técnicos de mantenimiento (no obra)
+    'tecnico','tecnicos','reparacion','reparaciones','mantenimiento',
+    'instalacion','instalaciones','instalador','instaladores',
+    'cerrajero','cerrajeros','mecanico','mecanicos',
+    'refrigeracion','aire acondicionado','clima','gasero','gaseros','gas',
+    // Limpieza y saneamiento
     'limpieza','limpiador','limpiadores','fumigador','fumigadores',
-    'desinfeccion','lavanderia','lavado','fumigacion',
-    // Jardín
-    'jardinero','jardineros','podador','podadores','paisajista','paisajistas',
+    'fumigacion','desinfeccion','lavanderia','lavado',
+    'control de plagas','plaga','plagas',
+    // Alberca / piscina
+    'alberca','piscina','lavado alberca','lavado piscina','mantenimiento alberca',
+    // Jardín y exteriores
+    'jardinero','jardineros','jardineria','podador','podadores','poda',
+    'paisajista','paisajistas',
     // Salud y bienestar
     'medico','medicos','doctor','doctores','doctora','doctoras',
     'enfermera','enfermeras','enfermero','enfermeros',
@@ -2171,29 +2190,30 @@ function normalizarTipo(raw) {
     'nutriologo','nutriologos','nutriologa','nutriologas','nutricionista','nutricionistas',
     'dentista','dentistas','odontologo','odontologos','optometrista','optometristas',
     'terapeuta','terapeutas','terapia','masajista','masajistas','masaje',
-    'pediatra','pediatras','geriatra','geriatras','gerontologo','gerontologos',
-    'veterinario','veterinarios','veterinaria',
+    'pediatra','pediatras','geriatra','geriatras','veterinario','veterinarios','veterinaria',
     // Belleza y estética
     'estetica','esteticista','esteticistas','cosmetologa','cosmetologas',
     'estilista','estilistas','peluquero','peluqueros','manicurista','manicuristas',
-    'barbero','barberos','maquillista','maquillistas','spa',
-    // Fitness y deporte
+    'barbero','barberos','maquillista','maquillistas','spa','spa','estetica',
+    // Educación y clases
+    'maestro','maestra','maestros','maestras',
+    'profesor','profesora','profesores','profesoras',
+    'tutor','tutora','tutores','tutoras','clases',
+    // Fitness
     'entrenador','entrenadores','entrenadora','entrenadoras',
-    'instructor','instructores','instructora','instructoras',
-    'yoga','pilates','crossfit',
-    // Profesionales / oficina
+    'instructor','instructores','yoga','pilates','crossfit',
+    // Profesionales
     'contador','contadores','contadora','contadoras','contabilidad',
-    'abogado','abogados','abogada','abogadas','notario','notarios','notaria',
+    'abogado','abogados','abogada','abogadas','notario','notarios',
     'arquitecto','arquitectos','arquitecta','arquitectas',
     'ingeniero','ingenieros','ingeniera','ingenieras',
-    'disenador','disenadores','disenadora','disenadoras','diseñador','diseñadores',
-    'fotografo','fotografos','fotografa','fotografas','fotografia',
+    'disenador','disenadores','fotografo','fotografos','fotografia',
     // Seguridad
     'vigilante','vigilantes','guardia','guardias','seguridad',
-    // Otros servicios comunes
-    'pintor','pintores','pintora','pintoras','decorador','decoradores',
+    // Mudanza y carga
     'mudanza','mudanzas','cargador','cargadores','flete','fletes',
-    'alberca','piscina','plaga','control de plagas',
+    // Decoración (no obra)
+    'decorador','decoradores','decoradora','decoradoras',
   ];
 
   // Repartidores
