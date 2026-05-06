@@ -2190,12 +2190,12 @@ function normalizarTipo(raw) {
     'bienes raices','broker','brokers',
   ];
 
-  if (construccion.some(k => t.includes(k))) return 'Trabajadores de la construcción';
-  if (inmobiliarios.some(k => t.includes(k)))  return 'Asesores inmobiliarios';
-  if (domesticas.some(k => t.includes(k)))     return 'Trabajadoras domésticas';
-  if (taxis.some(k => t.includes(k)))          return 'Taxis de aplicación';
-  if (repartidores.some(k => t.includes(k)))   return 'Repartidores';
-  if (proveedores.some(k => t.includes(k)))    return 'Proveedores';
+  if (construccion.some(k => t.includes(k)))  return 'Trabajadores de la construcción';
+  if (inmobiliarios.some(k => t.includes(k))) return 'Asesores inmobiliarios';
+  if (domesticas.some(k => t.includes(k)))    return 'Trabajadoras domésticas';
+  if (taxis.some(k => t.includes(k)))         return 'Taxis de aplicación';
+  if (repartidores.some(k => t.includes(k)))  return 'Repartidores';
+  if (proveedores.some(k => t.includes(k)))   return 'Proveedores y/o prestadores de servicio';
 
   return 'Otros';
 }
@@ -2261,11 +2261,20 @@ async function generarConcentrado(condominio) {
     datos[key].tipos[tipo] = (datos[key].tipos[tipo] || 0) + 1;
   }
 
+  const CATEGORIAS = [
+    'Trabajadores de la construcción',
+    'Proveedores y/o prestadores de servicio',
+    'Repartidores',
+    'Taxis de aplicación',
+    'Trabajadoras domésticas',
+    'Asesores inmobiliarios',
+    'Otros',
+  ];
+
   const meses = Object.keys(datos).sort();
   console.log(`📊 Concentrado: ${meses.length} meses`);
 
-  // Generar PDF — 3 columnas: Fecha | Tipo | Registros
-  const doc = new PDFDocument({ margin: 40, size: 'LETTER' });
+  const doc = new PDFDocument({ margin: 40, size: 'LETTER', autoFirstPage: false });
   const chunks = [];
   doc.on('data', c => chunks.push(c));
 
@@ -2273,52 +2282,95 @@ async function generarConcentrado(condominio) {
   const hoyStr = `${String(hoy.getDate()).padStart(2,'0')}/${monthNames[hoy.getMonth()]}/${hoy.getFullYear()}`;
   const titulo = condominio ? `Condominio: ${condominio}` : 'Todos los condominios';
 
-  doc.fontSize(14).font('Helvetica-Bold').text('CONCENTRADO DE PERSONAL POR MES', { align: 'center' });
-  doc.fontSize(10).font('Helvetica').text(titulo, { align: 'center' });
-  doc.fontSize(8).text(`Generado: ${hoyStr}`, { align: 'center' });
-  doc.moveDown(0.5);
-
-  const RH = 13;          // altura de cada fila (más compacto)
-  const cFecha = 40;  const wFecha = 130;   // "Septiembre 2025"
-  const cTipo  = 180; const wTipo  = 260;
-  const cRegs  = 450; const wRegs  = 80;
-
-  // Encabezado
-  let curY = doc.y;
-  doc.font('Helvetica-Bold').fontSize(8);
-  doc.rect(cFecha, curY - 2, wRegs + wTipo + wFecha + 10, RH + 2).fill('#eeeeee').fillColor('black');
-  doc.text('Fecha',      cFecha, curY, { width: wFecha, lineBreak: false });
-  doc.text('Tipo',       cTipo,  curY, { width: wTipo,  lineBreak: false });
-  doc.text('Registros',  cRegs,  curY, { width: wRegs,  lineBreak: false });
-  curY += RH + 4;
+  // Dimensiones tabla
+  const LEFT  = 60;
+  const cCat  = LEFT;       const wCat  = 360;
+  const cRegs = LEFT + 380; const wRegs = 80;
+  const TABLE_W = wCat + 20 + wRegs;
+  const RH = 22;
 
   let grandTotal = 0;
 
-  meses.forEach(key => {
+  meses.forEach((key, mesIdx) => {
     const row = datos[key];
-    const entradas = Object.entries(row.tipos).sort((a,b) => b[1]-a[1]);
-    entradas.forEach(([tipo, count], idx) => {
-      if (curY > 730) { doc.addPage(); curY = 50; }
-      doc.font(idx === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
-      // Fecha solo en la primera fila del mes
-      doc.text(idx === 0 ? row.label : '', cFecha, curY, { width: wFecha, lineBreak: false });
-      doc.font('Helvetica').fontSize(8);
-      doc.text(tipo,           cTipo, curY, { width: wTipo, lineBreak: false, ellipsis: true });
-      doc.text(String(count),  cRegs, curY, { width: wRegs, lineBreak: false });
+
+    // Una página por mes
+    doc.addPage();
+    let curY = 50;
+
+    // Encabezado de página
+    doc.fontSize(16).font('Helvetica-Bold').fillColor('black')
+       .text('CONCENTRADO DE PERSONAL', { align: 'center' });
+    doc.fontSize(13).text(row.label, { align: 'center' });
+    doc.fontSize(8).font('Helvetica').fillColor('#555555')
+       .text(`${titulo}   ·   Generado: ${hoyStr}`, { align: 'center' });
+    curY = doc.y + 12;
+
+    // Encabezado de tabla
+    doc.rect(cCat, curY, TABLE_W, RH).fill('#2c3e50');
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('white');
+    doc.text('Categoría',   cCat + 8,  curY + 6, { width: wCat,  lineBreak: false });
+    doc.text('Registros',   cRegs,     curY + 6, { width: wRegs, lineBreak: false, align: 'center' });
+    curY += RH;
+
+    let mesTotal = 0;
+    CATEGORIAS.forEach((cat, i) => {
+      const count = row.tipos[cat] || 0;
+      const bg = i % 2 === 0 ? '#f5f5f5' : '#ffffff';
+      doc.rect(cCat, curY, TABLE_W, RH).fill(bg);
+      doc.font('Helvetica').fontSize(9).fillColor('black');
+      doc.text(cat,          cCat + 8, curY + 6, { width: wCat,  lineBreak: false });
+      doc.font(count > 0 ? 'Helvetica-Bold' : 'Helvetica').fillColor(count > 0 ? 'black' : '#aaaaaa');
+      doc.text(count > 0 ? String(count) : '—', cRegs, curY + 6, { width: wRegs, lineBreak: false, align: 'center' });
       curY += RH;
+      mesTotal += count;
       grandTotal += count;
     });
-    // Línea separadora entre meses
-    doc.moveTo(cFecha, curY).lineTo(cRegs + wRegs, curY).strokeColor('#bbbbbb').stroke().strokeColor('black');
-    curY += 4;
+
+    // Total del mes
+    doc.rect(cCat, curY, TABLE_W, RH).fill('#2c3e50');
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('white');
+    doc.text('TOTAL DEL MES', cCat + 8, curY + 6, { width: wCat,  lineBreak: false });
+    doc.text(String(mesTotal), cRegs,   curY + 6, { width: wRegs, lineBreak: false, align: 'center' });
   });
 
-  // Total general
-  curY += 2;
-  doc.font('Helvetica-Bold').fontSize(8);
-  doc.rect(cFecha, curY - 1, wRegs + wTipo + wFecha + 10, RH + 1).fill('#dddddd').fillColor('black');
-  doc.text('TOTAL GENERAL', cFecha, curY, { width: wFecha + wTipo, lineBreak: false });
-  doc.text(String(grandTotal), cRegs, curY, { width: wRegs, lineBreak: false });
+  // Última página: resumen general
+  doc.addPage();
+  let sumY = 50;
+  doc.fontSize(16).font('Helvetica-Bold').fillColor('black')
+     .text('RESUMEN GENERAL', { align: 'center' });
+  doc.fontSize(10).font('Helvetica').fillColor('#555555')
+     .text(`${titulo}   ·   ${meses.length} meses   ·   Generado: ${hoyStr}`, { align: 'center' });
+  sumY = doc.y + 12;
+
+  // Totales por categoría sumando todos los meses
+  const totalesCat = {};
+  meses.forEach(key => {
+    CATEGORIAS.forEach(cat => {
+      totalesCat[cat] = (totalesCat[cat] || 0) + (datos[key].tipos[cat] || 0);
+    });
+  });
+
+  doc.rect(cCat, sumY, TABLE_W, RH).fill('#2c3e50');
+  doc.font('Helvetica-Bold').fontSize(9).fillColor('white');
+  doc.text('Categoría', cCat + 8, sumY + 6, { width: wCat,  lineBreak: false });
+  doc.text('Total',     cRegs,    sumY + 6, { width: wRegs, lineBreak: false, align: 'center' });
+  sumY += RH;
+
+  CATEGORIAS.forEach((cat, i) => {
+    const count = totalesCat[cat] || 0;
+    doc.rect(cCat, sumY, TABLE_W, RH).fill(i % 2 === 0 ? '#f5f5f5' : '#ffffff');
+    doc.font('Helvetica').fontSize(9).fillColor('black');
+    doc.text(cat, cCat + 8, sumY + 6, { width: wCat, lineBreak: false });
+    doc.font(count > 0 ? 'Helvetica-Bold' : 'Helvetica').fillColor(count > 0 ? 'black' : '#aaaaaa');
+    doc.text(count > 0 ? String(count) : '—', cRegs, sumY + 6, { width: wRegs, lineBreak: false, align: 'center' });
+    sumY += RH;
+  });
+
+  doc.rect(cCat, sumY, TABLE_W, RH).fill('#2c3e50');
+  doc.font('Helvetica-Bold').fontSize(9).fillColor('white');
+  doc.text('TOTAL GENERAL', cCat + 8, sumY + 6, { width: wCat,  lineBreak: false });
+  doc.text(String(grandTotal), cRegs,  sumY + 6, { width: wRegs, lineBreak: false, align: 'center' });
 
   doc.end();
   await new Promise(resolve => doc.on('end', resolve));
